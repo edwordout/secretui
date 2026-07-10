@@ -17,8 +17,11 @@ use ratatui::{
     },
     Terminal,
 };
-use std::io;
 use std::time::{Duration, Instant};
+use std::{
+    io::{self, Write},
+    process::{Command, Stdio},
+};
 use zeroize::Zeroize;
 
 const SECRET_TTL: Duration = Duration::from_secs(30);
@@ -1962,12 +1965,14 @@ async fn copy_selected(store: &impl SecretStore, app: &mut TuiApp) -> Result<()>
     if let Some(item) = app.selected_item() {
         let mut secret = store.reveal_secret(&item.path).await?;
         let mut text = String::from_utf8_lossy(&secret).to_string();
-        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-            clipboard.set_text(text.clone())?;
-            best_effort_clear_clipboard(text.clone());
-            app.message = "copied; clipboard clear scheduled".into();
-        } else {
-            app.message = "clipboard unavailable".into();
+        match copy_text_to_clipboard(&text) {
+            Ok(backend) => {
+                best_effort_clear_clipboard(text.clone(), backend);
+                app.message = format!("copied via {backend}; clipboard clear scheduled");
+            }
+            Err(_) => {
+                app.message = "clipboard unavailable; tried wl-copy, xclip, xsel, arboard".into();
+            }
         }
         text.zeroize();
         secret.zeroize();
@@ -1975,14 +1980,118 @@ async fn copy_selected(store: &impl SecretStore, app: &mut TuiApp) -> Result<()>
     Ok(())
 }
 
-fn best_effort_clear_clipboard(expected: String) {
-    std::thread::spawn(move || {
-        std::thread::sleep(SECRET_TTL);
-        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-            if clipboard.get_text().ok().as_deref() == Some(expected.as_str()) {
-                let _ = clipboard.set_text(String::new());
+fn copy_text_to_clipboard(text: &str) -> Result<&'static str> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        && write_clipboard_command("wl-copy", &["--type", "text/plain"], text).is_ok()
+    {
+        return Ok("wl-copy");
+    }
+    if std::env::var_os("DISPLAY").is_some()
+        && write_clipboard_command("xclip", &["-selection", "clipboard", "-in"], text).is_ok()
+    {
+        return Ok("xclip");
+    }
+    if std::env::var_os("DISPLAY").is_some()
+        && write_clipboard_command("xsel", &["--clipboard", "--input"], text).is_ok()
+    {
+        return Ok("xsel");
+    }
+    copy_with_arboard(text)?;
+    Ok("arboard")
+}
+
+fn copy_with_arboard(text: &str) -> Result<()> {
+    let mut clipboard = arboard::Clipboard::new()?;
+    #[cfg(target_os = "linux")]
+    {
+        use arboard::SetExtLinux;
+        clipboard
+            .set()
+            .exclude_from_history()
+            .text(text.to_owned())?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        clipboard.set_text(text.to_owned())?;
+    }
+    Ok(())
+}
+
+fn write_clipboard_command(command: &str, args: &[&str], text: &str) -> Result<()> {
+    let mut child = Command::new(command)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes())?;
+    }
+    let status = child.wait()?;
+    if !status.success() {
+        anyhow::bail!("{command} failed");
+    }
+    Ok(())
+}
+
+fn read_clipboard_command(command: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(command)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn clear_clipboard_if_unchanged(expected: &str, backend: &str) {
+    match backend {
+        "wl-copy" => {
+            if read_clipboard_command("wl-paste", &["--type", "text/plain"]).as_deref()
+                == Some(expected)
+            {
+                let _ = Command::new("wl-copy")
+                    .arg("--clear")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
             }
         }
+        "xclip" => {
+            if read_clipboard_command("xclip", &["-selection", "clipboard", "-out"]).as_deref()
+                == Some(expected)
+            {
+                let _ = write_clipboard_command("xclip", &["-selection", "clipboard", "-in"], "");
+            }
+        }
+        "xsel" => {
+            if read_clipboard_command("xsel", &["--clipboard", "--output"]).as_deref()
+                == Some(expected)
+            {
+                let _ = Command::new("xsel")
+                    .args(["--clipboard", "--clear"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+        }
+        _ => {
+            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                if clipboard.get_text().ok().as_deref() == Some(expected) {
+                    let _ = clipboard.set_text(String::new());
+                }
+            }
+        }
+    }
+}
+
+fn best_effort_clear_clipboard(expected: String, backend: &'static str) {
+    std::thread::spawn(move || {
+        std::thread::sleep(SECRET_TTL);
+        clear_clipboard_if_unchanged(&expected, backend);
     });
 }
 
