@@ -1,3 +1,29 @@
+# Rust build output
 /target/
+
+# Project-local Rust/Cargo state
 /.cargo-home/
 /.rustup/
+/.cargo-tools/
+
+# Local agent/editor state
+/.direnv/
+.vscode/
+.idea/
+
+# Local env/config
+.env
+.env.*
+!.env.example
+
+# Generated local exports/backups from README examples
+/metadata.json
+/metadata-*.json
+/*.age
+/secretui.bash
+/secretui.1
+
+# OS/editor noise
+.DS_Store
+*.swp
+*~
