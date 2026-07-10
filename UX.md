@@ -34,7 +34,7 @@ Each page should have a clear title, selected row marker, breadcrumb/header, and
 
 ## Actions
 
-Actions are explicit buttons on the Details page. The selected button is highlighted.
+Actions are explicit buttons and forms inside the TUI. The app should never drop into shell-style prompts for create, edit, or delete.
 
 Buttons:
 
@@ -44,6 +44,8 @@ Buttons:
 - `Delete`: delete selected item.
 - `Lock/Unlock`: lock or unlock selected collection.
 - `Back`: return to Items.
+
+Create/edit/delete forms use scrollable bordered input widgets with visible focus, cursor editing, validation messages, arrow-first navigation, and Save/Delete/Cancel buttons. Secret fields are masked while typing. Attributes open a dedicated single-column scrollable editor where users select existing attributes or add/update/remove key-value pairs. Inputs and lists keep readable minimum heights; if the terminal is too short, elements are hidden instead of crushed and scrollbars show overflow.
 
 Destructive or sensitive actions require confirmation. Reveal/copy should auto-expire after a short timeout.
 
