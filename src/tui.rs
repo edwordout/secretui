@@ -18,10 +18,7 @@ use ratatui::{
     Terminal,
 };
 use std::time::{Duration, Instant};
-use std::{
-    io::{self, Write},
-    process::{Command, Stdio},
-};
+use std::{io, sync::mpsc};
 use zeroize::Zeroize;
 
 const SECRET_TTL: Duration = Duration::from_secs(30);
@@ -1965,13 +1962,13 @@ async fn copy_selected(store: &impl SecretStore, app: &mut TuiApp) -> Result<()>
     if let Some(item) = app.selected_item() {
         let mut secret = store.reveal_secret(&item.path).await?;
         let mut text = String::from_utf8_lossy(&secret).to_string();
-        match copy_text_to_clipboard(&text) {
-            Ok(backend) => {
-                best_effort_clear_clipboard(text.clone(), backend);
-                app.message = format!("copied via {backend}; clipboard clear scheduled");
+        match copy_text_to_clipboard(text.clone()) {
+            Ok(()) => {
+                best_effort_clear_clipboard(text.clone());
+                app.message = "copied via arboard; clipboard clear scheduled".into();
             }
-            Err(_) => {
-                app.message = "clipboard unavailable; tried wl-copy, xclip, xsel, arboard".into();
+            Err(error) => {
+                app.message = format!("clipboard unavailable: {error}");
             }
         }
         text.zeroize();
@@ -1980,119 +1977,93 @@ async fn copy_selected(store: &impl SecretStore, app: &mut TuiApp) -> Result<()>
     Ok(())
 }
 
-fn copy_text_to_clipboard(text: &str) -> Result<&'static str> {
-    if std::env::var_os("WAYLAND_DISPLAY").is_some()
-        && write_clipboard_command("wl-copy", &["--type", "text/plain"], text).is_ok()
-    {
-        return Ok("wl-copy");
-    }
-    if std::env::var_os("DISPLAY").is_some()
-        && write_clipboard_command("xclip", &["-selection", "clipboard", "-in"], text).is_ok()
-    {
-        return Ok("xclip");
-    }
-    if std::env::var_os("DISPLAY").is_some()
-        && write_clipboard_command("xsel", &["--clipboard", "--input"], text).is_ok()
-    {
-        return Ok("xsel");
-    }
-    copy_with_arboard(text)?;
-    Ok("arboard")
+struct ArboardClipboard {
+    clipboard: arboard::Clipboard,
 }
 
-fn copy_with_arboard(text: &str) -> Result<()> {
-    let mut clipboard = arboard::Clipboard::new()?;
+impl ArboardClipboard {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            clipboard: arboard::Clipboard::new()?,
+        })
+    }
+
+    fn clear(&mut self) -> Result<()> {
+        Ok(self.clipboard.clear()?)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn set_text(&mut self, text: String) -> Result<()> {
+        self.clipboard.set_text(text)?;
+        Ok(())
+    }
+
+    fn get_text(&mut self) -> Result<String> {
+        Ok(self.clipboard.get_text()?)
+    }
+}
+
+fn copy_text_to_clipboard(text: String) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        use arboard::SetExtLinux;
-        clipboard
-            .set()
-            .exclude_from_history()
-            .text(text.to_owned())?;
+        copy_text_to_linux_clipboard(text)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        clipboard.set_text(text.to_owned())?;
+        let mut clipboard = ArboardClipboard::new()?;
+        clipboard.set_text(text)?;
+        Ok(())
     }
+}
+
+#[cfg(target_os = "linux")]
+fn copy_text_to_linux_clipboard(text: String) -> Result<()> {
+    let (ready_tx, ready_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = keep_linux_clipboard_owner(text, ready_tx.clone());
+        if let Err(error) = result {
+            let _ = ready_tx.send(Err(error.to_string()));
+        }
+    });
+
+    match ready_rx.recv_timeout(Duration::from_secs(1)) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => anyhow::bail!(error),
+        Err(_) => anyhow::bail!("clipboard did not become ready"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn keep_linux_clipboard_owner(
+    text: String,
+    ready_tx: mpsc::Sender<Result<(), String>>,
+) -> Result<()> {
+    use arboard::SetExtLinux;
+    let mut clipboard = arboard::Clipboard::new()?;
+
+    // First set validates the desktop clipboard path and makes the copy visible
+    // immediately. The second set keeps a Linux clipboard owner alive so Wayland
+    // and X11 sessions do not degrade into an empty paste.
+    clipboard.set().exclude_from_history().text(text.clone())?;
+    let _ = ready_tx.send(Ok(()));
+    clipboard.set().exclude_from_history().wait().text(text)?;
     Ok(())
 }
 
-fn write_clipboard_command(command: &str, args: &[&str], text: &str) -> Result<()> {
-    let mut child = Command::new(command)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(text.as_bytes())?;
-    }
-    let status = child.wait()?;
-    if !status.success() {
-        anyhow::bail!("{command} failed");
-    }
-    Ok(())
-}
-
-fn read_clipboard_command(command: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(command)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-fn clear_clipboard_if_unchanged(expected: &str, backend: &str) {
-    match backend {
-        "wl-copy" => {
-            if read_clipboard_command("wl-paste", &["--type", "text/plain"]).as_deref()
-                == Some(expected)
-            {
-                let _ = Command::new("wl-copy")
-                    .arg("--clear")
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
-        }
-        "xclip" => {
-            if read_clipboard_command("xclip", &["-selection", "clipboard", "-out"]).as_deref()
-                == Some(expected)
-            {
-                let _ = write_clipboard_command("xclip", &["-selection", "clipboard", "-in"], "");
-            }
-        }
-        "xsel" => {
-            if read_clipboard_command("xsel", &["--clipboard", "--output"]).as_deref()
-                == Some(expected)
-            {
-                let _ = Command::new("xsel")
-                    .args(["--clipboard", "--clear"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
-        }
-        _ => {
-            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                if clipboard.get_text().ok().as_deref() == Some(expected) {
-                    let _ = clipboard.set_text(String::new());
-                }
-            }
-        }
-    }
-}
-
-fn best_effort_clear_clipboard(expected: String, backend: &'static str) {
+fn best_effort_clear_clipboard(expected: String) {
     std::thread::spawn(move || {
         std::thread::sleep(SECRET_TTL);
-        clear_clipboard_if_unchanged(&expected, backend);
+        clear_clipboard_if_unchanged(&expected);
     });
+}
+
+fn clear_clipboard_if_unchanged(expected: &str) {
+    let Ok(mut clipboard) = ArboardClipboard::new() else {
+        return;
+    };
+    if clipboard.get_text().ok().as_deref() == Some(expected) {
+        let _ = clipboard.clear();
+    }
 }
 
 async fn lock_toggle(store: &impl SecretStore, app: &mut TuiApp) -> Result<()> {
