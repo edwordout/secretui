@@ -13,29 +13,32 @@ The project started when RustConn credentials existed in KWallet's Secret Servic
 - [KeepSecret](https://apps.kde.org/keepsecret/) provides a modern Secret Service-native graphical interface.
 - `secretui` provides interactive terminal navigation, editing, troubleshooting, and deterministic metadata migration.
 
+Its central differentiator is schema-neutral record maintenance: create, inspect, search, add, update, and remove arbitrary Secret Service attributes instead of assuming a fixed username/password shape.
+
 It is aimed at developers, terminal users, minimal desktop environments, support workflows, and remote sessions that already have access to a Secret Service provider.
 
 ## Installation
 
-Requirements: Linux, a running Freedesktop Secret Service provider (such as KDE Wallet, GNOME Keyring, or KeePassXC), and Rust 1.97.0 for source builds.
+Requirements: Linux and a running Freedesktop Secret Service provider (such as KDE Wallet, GNOME Keyring, or KeePassXC). Source builds also require Rust 1.97.0 and `cargo` available on `PATH`.
+
+There are no prebuilt releases yet, so installation currently requires a source build.
 
 Build and install from this repository:
 
 ```bash
-git clone <repository-url>
-cd secret_service_gui
+git clone https://github.com/edwordout/secretui.git
+cd secretui
 cargo install --path . --locked
 secretui
 ```
 
-For a standalone local build:
+For a standalone local build and install:
 
 ```bash
 cargo build --release --locked
-./target/release/secretui
+mkdir -p ~/.local/bin
+install -m755 target/release/secretui ~/.local/bin/secretui
 ```
-
-Prebuilt releases can install the `secretui` binary anywhere on `PATH`, for example `~/.local/bin/secretui`.
 
 ## Development
 

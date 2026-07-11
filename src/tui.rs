@@ -2359,8 +2359,7 @@ async fn reveal_selected(store: &impl SecretStore, app: &mut TuiApp) -> Result<(
 async fn copy_selected(store: &impl SecretStore, app: &mut TuiApp) -> Result<()> {
     if let Some(item) = app.selected_item() {
         let secret = store.reveal_secret(&item.path).await?;
-        let text = std::str::from_utf8(secret.as_slice())
-            .map_err(|_| anyhow::anyhow!("binary secret cannot be copied as text"))?;
+        let text = clipboard_text(secret.as_slice())?;
         let expected = Zeroizing::new(text.to_owned());
         let clipboard = match app.clipboard.as_mut() {
             Some(clipboard) => clipboard,
@@ -2374,6 +2373,11 @@ async fn copy_selected(store: &impl SecretStore, app: &mut TuiApp) -> Result<()>
         app.message = "copied; clipboard clear scheduled for 30s".into();
     }
     Ok(())
+}
+
+fn clipboard_text(secret: &[u8]) -> Result<&str> {
+    std::str::from_utf8(secret)
+        .map_err(|_| anyhow::anyhow!("binary secret cannot be copied as text"))
 }
 
 struct ArboardClipboard {
@@ -2716,6 +2720,11 @@ mod tests {
     fn secret_display_escapes_control_characters_and_binary() {
         assert_eq!(display_secret(b"a\nb"), "a\\nb");
         assert_eq!(display_secret(&[0xff]), "<binary: 1 bytes>");
+        assert_eq!(clipboard_text(b"text").unwrap(), "text");
+        assert_eq!(
+            clipboard_text(&[0xff]).unwrap_err().to_string(),
+            "binary secret cannot be copied as text"
+        );
     }
 
     #[test]
