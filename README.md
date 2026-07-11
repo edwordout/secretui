@@ -4,6 +4,8 @@
 
 `secretui` is a fast, keyboard-driven browser, editor, and maintenance tool for the Linux Secret Service API. Browse collections, discover application-created entries, inspect attributes, and safely maintain credentials (without writing D-Bus calls or knowing the attributes in advance).
 
+Linux Secret Service storage is commonly associated with desktop environments. `secretui` brings a usable, interactive management experience to terminals and remote sessions, lowering the barrier to managing Secret Service credentials on minimal and headless systems that already have the required user-session infrastructure.
+
 The project started when RustConn credentials existed in KWallet's Secret Service storage but were invisible in KWallet Manager. KWallet Manager uses the older KWallet-oriented view and may not expose generic Secret Service entries ([KDE discussion](https://discuss.kde.org/t/why-is-my-git-secret-not-visible-in-kwalletmanager-but-visible-in-seahorse-gui/43532)). That origin remains useful, but `secretui` is now positioned as a terminal-native administration and troubleshooting workspace rather than a replacement for every graphical password manager.
 
 ## Why secretui?
@@ -17,9 +19,17 @@ Its central differentiator is schema-neutral record maintenance: create, inspect
 
 It is aimed at developers, terminal users, minimal desktop environments, support workflows, and remote sessions that already have access to a Secret Service provider.
 
+## Terminal, remote, and headless use
+
+The [Secret Service specification](https://specifications.freedesktop.org/secret-service/latest/ch01.html) defines a service running in a user's login session. `secretui` communicates directly with that Freedesktop D-Bus API through the Rust [`secret-service`](https://docs.rs/secret-service/latest/secret_service/) crate; it does not use the C `libsecret` library.
+
+This makes `secretui` useful on SSH-accessed development hosts, jump hosts and personal servers, minimal desktop installations, and remote troubleshooting sessions. It remains a human-operated management tool: it does not create a session bus, install or start a provider, or solve noninteractive unlocking. The remote session must already be able to reach an unlocked or interactively unlockable Secret Service provider. Clipboard actions target the clipboard available to the remote process, which is not automatically the local SSH client's clipboard.
+
+For credentials consumed by system services at boot or by unattended infrastructure, use purpose-built facilities such as [systemd credentials](https://systemd.io/CREDENTIALS/), container-orchestrator secrets, Vault, or a cloud secret manager instead.
+
 ## Installation
 
-Requirements: Linux and a running Freedesktop Secret Service provider (such as KDE Wallet, GNOME Keyring, or KeePassXC). Source builds also require Rust 1.97.0 and `cargo` available on `PATH`.
+Requirements: Linux, a user session D-Bus, and a running Freedesktop Secret Service provider (such as KDE Wallet, GNOME Keyring, or KeePassXC). Headless and remote environments must configure these independently of `secretui`. Source builds also require Rust 1.97.0 and `cargo` available on `PATH`.
 
 Prebuilt releases are available for x86-64 Linux. Download and verify one before
 installing it into your user-local binary directory:
