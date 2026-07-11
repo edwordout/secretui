@@ -4,17 +4,64 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   quality:
-    runs-on: ubuntu-latest
+    name: Rust 1.97 quality and install gates
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
       - name: Install pinned Rust toolchain
         run: rustup show
-      - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
-      - run: cargo test --locked --all-targets
-      - run: RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked --all-targets
+
+      - name: Check documentation
+        run: RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps
+
+      - name: Build release binary
+        run: cargo build --locked --release
+
+      - name: Smoke-test CLI, man page, and completion
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(target/release/secretui --version)" = \
+            "secretui $({ cargo metadata --locked --no-deps --format-version 1; } | jq -r '.packages[] | select(.name == "secretui") | .version')"
+          target/release/secretui --help >/dev/null
+          target/release/secretui export --help >/dev/null
+          target/release/secretui import --help >/dev/null
+          target/release/secretui man > /tmp/secretui.1
+          target/release/secretui completions bash > /tmp/secretui.bash
+          test -s /tmp/secretui.1
+          test -s /tmp/secretui.bash
+
+      - name: Test clean locked installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_root="$(mktemp -d)"
+          trap 'rm -rf "$install_root"' EXIT
+          CARGO_TARGET_DIR="$install_root/target" \
+            cargo install --path . --locked --root "$install_root/root"
+          test "$("$install_root/root/bin/secretui" --version)" = \
+            "$(target/release/secretui --version)"
+
       - name: Audit dependencies
         run: |
           cargo install cargo-audit --locked

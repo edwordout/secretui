@@ -20,6 +20,8 @@
 # Generated local exports/backups from README examples
 /metadata.json
 /metadata-*.json
+*.secretui-recovery-*.json
+*.secretui-report-*.json
 /*.age
 /secretui.bash
 /secretui.1

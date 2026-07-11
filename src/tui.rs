@@ -1,7 +1,8 @@
 use crate::domain::{
     Attributes, CollectionInfo, ItemInfo, NewCollection, NewItem, SecretBytes, SecretValue,
 };
-use crate::store::SecretStore;
+use crate::store::{ItemTarget, SecretStore, StoreOutcome};
+use crate::terminal as terminal_text;
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use crossterm::{
@@ -53,6 +54,7 @@ enum FormKind {
     NewCollection,
     NewItem,
     EditItem,
+    ReplaceSecret,
     DeleteItem,
     NewAttribute,
     EditAttribute,
@@ -190,7 +192,7 @@ struct FormState {
 impl FormState {
     fn buttons(&self) -> &'static [&'static str] {
         match self.kind {
-            FormKind::DeleteItem => &["Delete", "Cancel"],
+            FormKind::DeleteItem => &["Cancel", "Delete"],
             FormKind::NewAttribute => &["Add", "Cancel"],
             FormKind::EditAttribute => &["Update", "Cancel", "Remove"],
             FormKind::UnsavedChanges => &["Save Changes", "Discard", "Keep Editing"],
@@ -202,7 +204,8 @@ impl FormState {
         match self.kind {
             FormKind::NewCollection => "New Collection",
             FormKind::NewItem => "New Item",
-            FormKind::EditItem => "Edit Item",
+            FormKind::EditItem => "Edit Item Metadata",
+            FormKind::ReplaceSecret => "Replace Secret",
             FormKind::DeleteItem => "Delete Item",
             FormKind::NewAttribute => "New Attribute",
             FormKind::EditAttribute => "Edit Attribute",
@@ -214,7 +217,7 @@ impl FormState {
         match self.kind {
             FormKind::NewCollection => Page::Collections,
             FormKind::NewItem => Page::Items,
-            FormKind::EditItem | FormKind::DeleteItem => Page::Details,
+            FormKind::EditItem | FormKind::ReplaceSecret | FormKind::DeleteItem => Page::Details,
             FormKind::NewAttribute | FormKind::EditAttribute | FormKind::UnsavedChanges => {
                 Page::Form
             }
@@ -229,18 +232,20 @@ enum DetailAction {
     CopyBase64,
     CopyHex,
     Edit,
+    ReplaceSecret,
     Delete,
     LockUnlock,
     Back,
 }
 
-const DETAIL_ACTIONS: [DetailAction; 8] = [
+const DETAIL_ACTIONS: [DetailAction; 9] = [
     DetailAction::Back,
     DetailAction::Reveal,
     DetailAction::CopyText,
     DetailAction::CopyBase64,
     DetailAction::CopyHex,
     DetailAction::Edit,
+    DetailAction::ReplaceSecret,
     DetailAction::Delete,
     DetailAction::LockUnlock,
 ];
@@ -278,6 +283,12 @@ struct ClipboardClearState {
     expires_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct DeleteSnapshot {
+    collection: CollectionInfo,
+    item: ItemInfo,
+}
+
 pub struct TuiApp {
     collections: Vec<CollectionInfo>,
     items: Vec<ItemInfo>,
@@ -298,6 +309,7 @@ pub struct TuiApp {
     clipboard: Option<ArboardClipboard>,
     clipboard_clear: Option<ClipboardClearState>,
     form: Option<FormState>,
+    delete_snapshot: Option<DeleteSnapshot>,
 }
 
 impl TuiApp {
@@ -315,7 +327,7 @@ impl TuiApp {
             selected_item: 0,
             collection_state: ListState::default(),
             item_state: ListState::default(),
-            selected_action: 1,
+            selected_action: 0,
             detail_scroll: 0,
             reveal_scroll_pending: false,
             help_scroll: 0,
@@ -328,12 +340,14 @@ impl TuiApp {
             clipboard: None,
             clipboard_clear: None,
             form: None,
+            delete_snapshot: None,
         };
         app.sync_states();
         app
     }
 
     async fn refresh_all(&mut self, store: &impl SecretStore) -> Result<()> {
+        self.clear_reveal();
         self.collections = store.list_collections().await?;
         self.selected_collection = self
             .selected_collection
@@ -342,6 +356,7 @@ impl TuiApp {
     }
 
     async fn refresh_items(&mut self, store: &impl SecretStore) -> Result<()> {
+        self.clear_reveal();
         self.items = match self.collections.get(self.selected_collection) {
             Some(collection) => store.list_items(&collection.path).await?,
             None => Vec::new(),
@@ -379,6 +394,7 @@ impl TuiApp {
 
     fn next_page(&mut self) {
         let previous = self.page;
+        self.clear_reveal();
         self.page = match self.page {
             Page::Collections => Page::Items,
             Page::Items => Page::Details,
@@ -386,7 +402,7 @@ impl TuiApp {
             Page::Form => Page::Form,
         };
         if previous != Page::Details && self.page == Page::Details {
-            self.selected_action = 1;
+            self.selected_action = 0;
             self.detail_scroll = 0;
         }
     }
@@ -400,9 +416,7 @@ impl TuiApp {
     }
 
     fn previous_page(&mut self) {
-        if self.page == Page::Details {
-            self.reveal = None;
-        }
+        self.clear_reveal();
         self.page = match self.page {
             Page::Collections => Page::Collections,
             Page::Items => Page::Collections,
@@ -425,13 +439,13 @@ impl TuiApp {
                 self.selected_collection =
                     move_index(self.selected_collection, self.collections.len(), delta);
                 self.selected_item = 0;
-                self.reveal = None;
+                self.clear_reveal();
             }
             Page::Items => {
                 self.selected_item =
                     move_index(self.selected_item, self.filtered_items().len(), delta);
                 self.detail_scroll = 0;
-                self.reveal = None;
+                self.clear_reveal();
             }
             Page::Details => {
                 self.detail_scroll = move_index(self.detail_scroll, usize::MAX / 2, delta);
@@ -442,6 +456,7 @@ impl TuiApp {
     }
 
     fn jump_selection(&mut self, end: bool) {
+        self.clear_reveal();
         match self.page {
             Page::Collections => {
                 self.selected_collection = if end {
@@ -503,6 +518,11 @@ impl TuiApp {
             self.message = "clipboard clear attempted".into();
         }
     }
+
+    fn clear_reveal(&mut self) {
+        self.reveal = None;
+        self.reveal_scroll_pending = false;
+    }
 }
 
 pub async fn run_tui(store: &impl SecretStore) -> Result<()> {
@@ -516,7 +536,7 @@ pub async fn run_tui(store: &impl SecretStore) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let mut app = TuiApp::new(store).await?;
-    let result = loop {
+    let operation_result = loop {
         app.expire_secret();
         if let Err(error) = terminal.draw(|frame| draw(frame, &mut app)) {
             break Err(error.into());
@@ -544,6 +564,7 @@ pub async fn run_tui(store: &impl SecretStore) -> Result<()> {
                     Ok(true) => break Ok(()),
                     Ok(false) => {}
                     Err(error) => {
+                        app.clear_reveal();
                         let message = format!("error: {error:#}");
                         if let Some(form) = app.form.as_mut() {
                             form.message = message;
@@ -556,6 +577,26 @@ pub async fn run_tui(store: &impl SecretStore) -> Result<()> {
             Ok(_) => {}
             Err(error) => break Err(error.into()),
         }
+    };
+    app.clear_reveal();
+    clear_form_secrets(&mut app);
+    let cleanup_result = store.cleanup_temporary_unlocks().await.and_then(|outcome| {
+        if outcome.warnings.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "temporary-unlock cleanup remained incomplete: {}",
+                warning_text(&outcome.warnings)
+            ))
+        }
+    });
+    let result = match (operation_result, cleanup_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(operation_error), Ok(())) => Err(operation_error),
+        (Ok(()), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(operation_error), Err(cleanup_error)) => Err(anyhow::anyhow!(
+            "TUI operation failed: {operation_error:#}; shutdown cleanup also failed: {cleanup_error:#}"
+        )),
     };
     drop(terminal);
     result
@@ -619,6 +660,9 @@ async fn handle_key(store: &impl SecretStore, app: &mut TuiApp, key: KeyEvent) -
                 app.mode = InputMode::Help;
                 app.help_scroll = 0;
             }
+            KeyCode::Char('r') if app.page == Page::Details => {
+                reveal_selected(store, app).await?;
+            }
             KeyCode::Esc | KeyCode::Char('h') => app.previous_page(),
             KeyCode::Left => {
                 if app.page == Page::Details {
@@ -667,6 +711,7 @@ async fn handle_key(store: &impl SecretStore, app: &mut TuiApp, key: KeyEvent) -
                 app.jump_selection(true);
             }
             KeyCode::Char('/') => {
+                app.clear_reveal();
                 if app.page == Page::Collections {
                     if app.selected_collection().is_none() {
                         app.message = "create or select a collection first".into();
@@ -708,14 +753,19 @@ fn key_starts_backend_operation(app: &TuiApp, key: KeyEvent) -> bool {
                 | DetailAction::CopyHex
                 | DetailAction::LockUnlock
         ),
+        (Page::Details, KeyCode::Char('r')) => true,
         (Page::Form, KeyCode::Enter) => app.form.as_ref().is_some_and(|form| {
             form.focus_buttons
-                && form.selected_button == 0
+                && matches!(
+                    form.buttons().get(form.selected_button).copied(),
+                    Some("Save" | "Save Changes" | "Delete")
+                )
                 && matches!(
                     form.kind,
                     FormKind::NewCollection
                         | FormKind::NewItem
                         | FormKind::EditItem
+                        | FormKind::ReplaceSecret
                         | FormKind::DeleteItem
                         | FormKind::UnsavedChanges
                 )
@@ -727,6 +777,7 @@ fn key_starts_backend_operation(app: &TuiApp, key: KeyEvent) -> bool {
 fn handle_search_key(app: &mut TuiApp, key: KeyEvent) {
     match key.code {
         KeyCode::Enter | KeyCode::Esc => {
+            app.clear_reveal();
             app.mode = InputMode::Normal;
             app.message = if app.filter.is_empty() {
                 "search cleared".into()
@@ -735,12 +786,14 @@ fn handle_search_key(app: &mut TuiApp, key: KeyEvent) {
             };
         }
         KeyCode::Backspace => {
+            app.clear_reveal();
             app.filter.pop();
             app.selected_item = 0;
             app.clamp_item_selection();
             app.sync_states();
         }
         KeyCode::Char(ch) => {
+            app.clear_reveal();
             app.filter.push(ch);
             app.selected_item = 0;
             app.clamp_item_selection();
@@ -909,7 +962,7 @@ fn form_down(app: &mut TuiApp) {
     if !form.focus_buttons
         && form.fields.get(form.selected_field).map(|field| field.kind)
             == Some(FormFieldKind::Attributes)
-        && form.selected_attribute < form.attributes.len()
+        && form.selected_attribute < displayed_attribute_count(form)
     {
         form.selected_attribute += 1;
         return;
@@ -940,7 +993,7 @@ fn form_up(app: &mut TuiApp) {
     form_prev_focus(app);
     if entering_attributes {
         if let Some(form) = app.form.as_mut() {
-            form.selected_attribute = form.attributes.len();
+            form.selected_attribute = displayed_attribute_count(form);
         }
     }
 }
@@ -984,6 +1037,9 @@ fn discard_current_form(app: &mut TuiApp) {
         return;
     };
     let page = form.cancel_page();
+    if form.kind == FormKind::DeleteItem {
+        app.delete_snapshot = None;
+    }
     clear_form_state_secrets(&mut form);
     app.page = page;
     app.message = "cancelled".into();
@@ -1043,6 +1099,7 @@ async fn submit_parent_form(store: &impl SecretStore, app: &mut TuiApp) -> Resul
         Some(FormKind::NewCollection) => submit_new_collection(store, app).await?,
         Some(FormKind::NewItem) => submit_new_item(store, app).await?,
         Some(FormKind::EditItem) => submit_edit_item(store, app).await?,
+        Some(FormKind::ReplaceSecret) => submit_replace_secret(store, app).await?,
         Some(FormKind::DeleteItem) => submit_delete_item(store, app).await?,
         _ => {}
     }
@@ -1053,7 +1110,9 @@ fn open_attribute_form(app: &mut TuiApp) {
     let Some(parent) = app.form.take() else {
         return;
     };
-    let selected = parent.selected_attribute.min(parent.attributes.len());
+    let selected = parent
+        .selected_attribute
+        .min(displayed_attribute_count(&parent));
     let existing = parent
         .attributes
         .iter()
@@ -1354,7 +1413,7 @@ fn draw_collections(frame: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: rata
                 &format!(
                     "{}{}",
                     if collection.locked { "🔒 " } else { "" },
-                    collection.label
+                    terminal_text::label(&collection.label)
                 ),
                 row_width,
             )
@@ -1394,7 +1453,11 @@ fn draw_items(frame: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: ratatui::l
         .iter()
         .map(|item| {
             wrapped_list_item(
-                &format!("{}{}", if item.locked { "🔒 " } else { "" }, item.label),
+                &format!(
+                    "{}{}",
+                    if item.locked { "🔒 " } else { "" },
+                    terminal_text::label(&item.label)
+                ),
                 row_width,
             )
         })
@@ -1402,7 +1465,7 @@ fn draw_items(frame: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: ratatui::l
     let title = if app.filter.is_empty() {
         "Items".to_owned()
     } else {
-        format!("Items /{}", app.filter)
+        format!("Items /{}", terminal_text::attribute_value(&app.filter))
     };
     frame.render_stateful_widget(
         List::new(rows)
@@ -1473,11 +1536,19 @@ fn draw_form(frame: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
     });
 
     let help = if form.kind == FormKind::DeleteItem {
-        "Choose Delete or Cancel. Esc cancels."
+        "Choose Cancel or Delete. Esc cancels."
     } else {
         "↑↓ move fields · ←/→ move cursor · Enter next/save · Tab also works · Esc cancel"
     };
-    let mut help_lines = wrap_text(&form.message, inner.width as usize);
+    let mut help_lines = if form.kind == FormKind::DeleteItem {
+        delete_confirmation_lines(
+            &form.message,
+            app.delete_snapshot.as_ref(),
+            inner.width as usize,
+        )
+    } else {
+        wrap_text(&terminal_text::error(&form.message), inner.width as usize)
+    };
     help_lines.extend(wrap_text(help, inner.width as usize));
     let show_help = inner.height >= 8 && !help_lines.is_empty();
     let button_lines = form_button_lines(form, inner.width);
@@ -1577,11 +1648,67 @@ fn draw_form(frame: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
     }
 }
 
+fn delete_confirmation_lines(
+    message: &str,
+    snapshot: Option<&DeleteSnapshot>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut logical_lines = vec![terminal_text::error(message)];
+    if let Some(snapshot) = snapshot {
+        logical_lines.extend([
+            format!("Item label: {}", terminal_text::label(&snapshot.item.label)),
+            format!(
+                "Collection: {}",
+                terminal_text::label(&snapshot.collection.label)
+            ),
+            format!(
+                "Collection path: {}",
+                terminal_text::path(&snapshot.collection.path)
+            ),
+            format!("Item path: {}", terminal_text::path(&snapshot.item.path)),
+            "WARNING: Metadata exports contain no secret values and cannot restore a deleted secret."
+                .into(),
+            "Attributes:".into(),
+        ]);
+        logical_lines.extend(
+            snapshot
+                .item
+                .attributes
+                .iter()
+                .take(terminal_text::DISPLAYED_ATTRIBUTE_LIMIT)
+                .map(|(key, value)| {
+                    format!(
+                        "  {}={}",
+                        terminal_text::attribute_key(key),
+                        terminal_text::attribute_value(value)
+                    )
+                }),
+        );
+        let omitted = snapshot
+            .item
+            .attributes
+            .len()
+            .saturating_sub(terminal_text::DISPLAYED_ATTRIBUTE_LIMIT);
+        if omitted > 0 {
+            logical_lines.push(format!("  … {omitted} attribute(s) not displayed"));
+        } else if snapshot.item.attributes.is_empty() {
+            logical_lines.push("  <none>".into());
+        }
+    }
+    logical_lines
+        .into_iter()
+        .flat_map(|line| wrap_text(&line, width))
+        .collect()
+}
+
 fn form_title(form: &FormState) -> String {
     if form.dirty
         && matches!(
             form.kind,
-            FormKind::NewCollection | FormKind::NewItem | FormKind::EditItem
+            FormKind::NewCollection
+                | FormKind::NewItem
+                | FormKind::EditItem
+                | FormKind::ReplaceSecret
         )
     {
         format!("{} (unsaved)", form.title())
@@ -1601,9 +1728,23 @@ fn form_field_heights(form: &FormState, width: u16) -> Vec<usize> {
             let rows_height: usize = form
                 .attributes
                 .iter()
-                .map(|(key, value)| wrapped_list_item(&format!("{key} = {value}"), row_width).1)
+                .take(terminal_text::DISPLAYED_ATTRIBUTE_LIMIT)
+                .map(|(key, value)| {
+                    wrapped_list_item(
+                        &format!(
+                            "{} = {}",
+                            terminal_text::attribute_key(key),
+                            terminal_text::attribute_value(value)
+                        ),
+                        row_width,
+                    )
+                    .1
+                })
                 .sum::<usize>()
-                .saturating_add(1);
+                .saturating_add(1)
+                .saturating_add(usize::from(
+                    form.attributes.len() > terminal_text::DISPLAYED_ATTRIBUTE_LIMIT,
+                ));
             rows_height.saturating_add(2).clamp(5, 9)
         })
         .collect()
@@ -1618,8 +1759,19 @@ fn draw_attribute_list_field(
     let row_width = area.width.saturating_sub(4) as usize;
     let mut rows = Vec::new();
     let mut row_heights = Vec::new();
-    for (key, value) in &form.attributes {
-        let (row, height) = wrapped_list_item(&format!("{key} = {value}"), row_width);
+    for (key, value) in form
+        .attributes
+        .iter()
+        .take(terminal_text::DISPLAYED_ATTRIBUTE_LIMIT)
+    {
+        let (row, height) = wrapped_list_item(
+            &format!(
+                "{} = {}",
+                terminal_text::attribute_key(key),
+                terminal_text::attribute_value(value)
+            ),
+            row_width,
+        );
         rows.push(row);
         row_heights.push(height);
     }
@@ -1632,7 +1784,18 @@ fn draw_attribute_list_field(
     );
     row_heights.push(1);
 
-    form.selected_attribute = form.selected_attribute.min(form.attributes.len());
+    let omitted = form
+        .attributes
+        .len()
+        .saturating_sub(terminal_text::DISPLAYED_ATTRIBUTE_LIMIT);
+    if omitted > 0 {
+        rows.push(ListItem::new(format!(
+            "… {omitted} additional attribute(s) not displayed"
+        )));
+        row_heights.push(1);
+    }
+
+    form.selected_attribute = form.selected_attribute.min(displayed_attribute_count(form));
     let mut state = ListState::default().with_selected(Some(form.selected_attribute));
     frame.render_stateful_widget(
         List::new(rows)
@@ -1661,13 +1824,22 @@ fn draw_attribute_list_field(
     );
 }
 
+fn displayed_attribute_count(form: &FormState) -> usize {
+    form.attributes
+        .len()
+        .min(terminal_text::DISPLAYED_ATTRIBUTE_LIMIT)
+}
+
 fn draw_input_field(frame: &mut ratatui::Frame<'_>, field: &FormField, focused: bool, area: Rect) {
     if area.height == 0 {
         return;
     }
     if area.height < 3 {
         let marker = if focused { "▶ " } else { "" };
-        frame.render_widget(Paragraph::new(format!("{marker}{} …", field.label)), area);
+        frame.render_widget(
+            Paragraph::new(format!("{marker}{} …", terminal_text::label(&field.label))),
+            area,
+        );
         return;
     }
 
@@ -1681,11 +1853,15 @@ fn draw_input_field(frame: &mut ratatui::Frame<'_>, field: &FormField, focused: 
         Style::default()
     };
     let title = if let Some(error) = &field.error {
-        format!("{} ({})", field.label, error)
+        format!(
+            "{} ({})",
+            terminal_text::label(&field.label),
+            terminal_text::error(error)
+        )
     } else if field.kind == FormFieldKind::Attributes {
-        format!("{} (Enter to edit)", field.label)
+        format!("{} (Enter to edit)", terminal_text::label(&field.label))
     } else {
-        field.label.clone()
+        terminal_text::label(&field.label)
     };
     let inner_width = area.width.saturating_sub(2) as usize;
     let horizontal_scroll = if focused && inner_width > 0 {
@@ -1694,16 +1870,27 @@ fn draw_input_field(frame: &mut ratatui::Frame<'_>, field: &FormField, focused: 
         0
     };
     frame.render_widget(
-        Paragraph::new(field.visible_value(focused))
-            .scroll((0, horizontal_scroll.min(u16::MAX as usize) as u16))
-            .block(
-                Block::default()
-                    .title(title)
-                    .borders(Borders::ALL)
-                    .border_style(border_style),
-            ),
+        Paragraph::new(terminal_text::terminal_safe(
+            &field.visible_value(focused),
+            form_field_render_limit(field),
+        ))
+        .scroll((0, horizontal_scroll.min(u16::MAX as usize) as u16))
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(border_style),
+        ),
         area,
     );
+}
+
+fn form_field_render_limit(field: &FormField) -> usize {
+    match field.label.as_str() {
+        "Key" => terminal_text::ATTRIBUTE_KEY_GRAPHEME_LIMIT,
+        "Label" | "Alias" => terminal_text::LABEL_GRAPHEME_LIMIT,
+        _ => terminal_text::ATTRIBUTE_VALUE_GRAPHEME_LIMIT,
+    }
 }
 
 fn button_row_lines(
@@ -1875,18 +2062,26 @@ fn header(app: &TuiApp) -> String {
     };
     let collection = app
         .selected_collection()
-        .map(|collection| collection.label.as_str())
-        .unwrap_or("none");
+        .map(|collection| terminal_text::label(&collection.label))
+        .unwrap_or_else(|| "none".into());
     let item = app
         .selected_item()
-        .map(|item| item.label.as_str())
-        .unwrap_or("none");
-    format!("secretui  /  {page}\ncollection: {collection}  |  item: {item}")
+        .map(|item| terminal_text::label(&item.label))
+        .unwrap_or_else(|| "none".into());
+    let mut header = format!("secretui  /  {page}\ncollection: {collection}  |  item: {item}");
+    if !app.message.is_empty() {
+        write!(header, "\nstatus: {}", terminal_text::error(&app.message))
+            .expect("write to string");
+    }
+    header
 }
 
 fn footer(app: &TuiApp) -> String {
     match app.mode {
-        InputMode::Search => format!("Search: {}  ·  Enter/Esc finish  ·  Backspace edit", app.filter),
+        InputMode::Search => format!(
+            "Search: {}  ·  Enter/Esc finish  ·  Backspace edit",
+            terminal_text::attribute_value(&app.filter)
+        ),
         InputMode::Help => "↑↓ scroll  ·  Esc / ? close help".into(),
         InputMode::Normal => match app.page {
             Page::Collections => {
@@ -1896,7 +2091,7 @@ fn footer(app: &TuiApp) -> String {
                 "↑↓ choose item  ·  Enter/→ details  ·  ←/Esc collections  ·  n New Item  ·  / search  ·  ? help  ·  q quit".into()
             }
             Page::Details => {
-                "↑↓ scroll  ·  ←/→ choose button  ·  Enter activate  ·  Esc back  ·  ? help  ·  q quit".into()
+                "↑↓ scroll  ·  ←/→ choose button  ·  Enter activate  ·  r reveal  ·  Esc back  ·  ? help  ·  q quit".into()
             }
             Page::Form => {
                 "↑↓ move/scroll  ·  ←/→ cursor/buttons  ·  Enter next/activate  ·  Esc cancel".into()
@@ -1921,7 +2116,13 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::from("Actions"),
         Line::from("  Collections: n New Collection"),
         Line::from("  Items: n New Item"),
-        Line::from("  Details buttons: reveal/copy text/copy Base64/copy hex/edit/delete/lock"),
+        Line::from("  Details: r explicitly reveals the selected secret"),
+        Line::from(
+            "  Details buttons: Back/reveal/copy text/copy Base64/copy hex/edit metadata/replace secret/delete/lock",
+        ),
+        Line::from(
+            "  Reveal/Copy/Edit/Replace/Delete may temporarily unlock the needed collection or item; SecretUI restores its original lock state.",
+        ),
         Line::from("  / search  ? help  q quit"),
         Line::from(""),
         Line::from("Secrets stay hidden unless explicitly revealed or copied."),
@@ -1931,24 +2132,56 @@ fn help_lines() -> Vec<Line<'static>> {
 fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(""),
-        Line::from(app.message.clone()),
+        Line::from(terminal_text::error(&app.message)),
+        Line::from(
+            "Explicit Reveal/Copy/Edit/Replace/Delete authorizes provider prompts and any temporary unlock of the needed collection or item; SecretUI restores its original lock state.",
+        ),
         Line::from(""),
     ];
     if let Some(collection) = app.selected_collection() {
         lines.push(Line::from("Collection"));
-        lines.push(Line::from(format!("  label: {}", collection.label)));
-        lines.push(Line::from(format!("  path: {}", collection.path)));
+        lines.push(Line::from(format!(
+            "  label: {}",
+            terminal_text::label(&collection.label)
+        )));
+        lines.push(Line::from(format!(
+            "  path: {}",
+            terminal_text::path(&collection.path)
+        )));
         lines.push(Line::from(""));
     }
     if let Some(item) = app.selected_item() {
         lines.push(Line::from("Item"));
-        lines.push(Line::from(format!("  label: {}", item.label)));
-        lines.push(Line::from(format!("  path: {}", item.path)));
+        lines.push(Line::from(format!(
+            "  label: {}",
+            terminal_text::label(&item.label)
+        )));
+        lines.push(Line::from(format!(
+            "  path: {}",
+            terminal_text::path(&item.path)
+        )));
         lines.push(Line::from(format!("  locked: {}", item.locked)));
         lines.push(Line::from(""));
         lines.push(Line::from("Attributes"));
-        for (key, value) in &item.attributes {
-            lines.push(Line::from(format!("  {key}={value}")));
+        for (key, value) in item
+            .attributes
+            .iter()
+            .take(terminal_text::DISPLAYED_ATTRIBUTE_LIMIT)
+        {
+            lines.push(Line::from(format!(
+                "  {}={}",
+                terminal_text::attribute_key(key),
+                terminal_text::attribute_value(value)
+            )));
+        }
+        let omitted = item
+            .attributes
+            .len()
+            .saturating_sub(terminal_text::DISPLAYED_ATTRIBUTE_LIMIT);
+        if omitted > 0 {
+            lines.push(Line::from(format!(
+                "  … {omitted} attribute(s) not displayed"
+            )));
         }
         lines.push(Line::from(""));
         lines.push(Line::from("Secret"));
@@ -1960,7 +2193,7 @@ fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
         lines.push(Line::from(format!(
             "  content type: {}",
             metadata
-                .map(|metadata| escape_display_text(&metadata.content_type))
+                .map(|metadata| terminal_text::attribute_value(&metadata.content_type))
                 .as_deref()
                 .unwrap_or("unavailable until Reveal or Copy")
         )));
@@ -2041,7 +2274,7 @@ fn secret_preview(value: &SecretValue) -> Vec<String> {
                 preview_len -= 1;
             }
             let text = std::str::from_utf8(&secret[..preview_len]).expect("valid UTF-8 boundary");
-            let escaped = escape_display_text(text);
+            let escaped = terminal_text::attribute_value(text);
             let mut lines = vec![if escaped.is_empty() {
                 "<empty>".into()
             } else {
@@ -2072,10 +2305,6 @@ fn secret_preview(value: &SecretValue) -> Vec<String> {
     }
 }
 
-fn escape_display_text(text: &str) -> String {
-    text.chars().flat_map(char::escape_default).collect()
-}
-
 fn append_omitted_bytes(lines: &mut Vec<String>, omitted: usize) {
     if omitted > 0 {
         lines.push(format!("… {omitted} byte(s) omitted"));
@@ -2091,7 +2320,8 @@ fn action_button_lines(app: &TuiApp, width: u16) -> Vec<Line<'static>> {
             DetailAction::CopyText => "Copy Text",
             DetailAction::CopyBase64 => "Copy Base64",
             DetailAction::CopyHex => "Copy Hex",
-            DetailAction::Edit => "Edit",
+            DetailAction::Edit => "Edit Metadata",
+            DetailAction::ReplaceSecret => "Replace Secret",
             DetailAction::Delete => "Delete",
             DetailAction::LockUnlock => {
                 if app
@@ -2170,6 +2400,7 @@ async fn activate_detail_action(store: &impl SecretStore, app: &mut TuiApp) -> R
         DetailAction::CopyBase64 => copy_selected(store, app, CopyEncoding::Base64).await?,
         DetailAction::CopyHex => copy_selected(store, app, CopyEncoding::Hex).await?,
         DetailAction::Edit => start_edit_item(app),
+        DetailAction::ReplaceSecret => start_replace_secret(app),
         DetailAction::Delete => start_delete_item(app),
         DetailAction::LockUnlock => lock_toggle(store, app).await?,
         DetailAction::Back => app.previous_page(),
@@ -2178,6 +2409,8 @@ async fn activate_detail_action(store: &impl SecretStore, app: &mut TuiApp) -> R
 }
 
 fn start_new_collection(app: &mut TuiApp) {
+    app.clear_reveal();
+    app.delete_snapshot = None;
     app.form = Some(FormState {
         kind: FormKind::NewCollection,
         fields: vec![FormField::text("Label", ""), FormField::text("Alias", "")],
@@ -2201,6 +2434,8 @@ fn start_new_item(app: &mut TuiApp) {
         app.message = "create or select a collection first".into();
         return;
     }
+    app.clear_reveal();
+    app.delete_snapshot = None;
     app.form = Some(FormState {
         kind: FormKind::NewItem,
         fields: vec![
@@ -2229,14 +2464,13 @@ fn start_edit_item(app: &mut TuiApp) {
         return;
     };
     let attribute_count = item.attributes.len();
-    app.reveal = None;
+    app.clear_reveal();
+    app.delete_snapshot = None;
     app.form = Some(FormState {
         kind: FormKind::EditItem,
         fields: vec![
             FormField::text("Label", item.label),
             FormField::attributes(attribute_count),
-            FormField::secret("New secret (blank keeps current)"),
-            FormField::text("New secret content type", "text/plain"),
         ],
         attributes: item.attributes,
         selected_attribute: 0,
@@ -2247,7 +2481,36 @@ fn start_edit_item(app: &mut TuiApp) {
         focus_buttons: false,
         target_item_path: Some(item.path),
         parent: None,
-        message: "Secret and its content type change only when New secret is non-empty.".into(),
+        message: "Edit metadata only. Secret replacement is a separate Details action.".into(),
+        dirty: false,
+    });
+    app.page = Page::Form;
+}
+
+fn start_replace_secret(app: &mut TuiApp) {
+    let Some(item) = app.selected_item().cloned() else {
+        return;
+    };
+    app.clear_reveal();
+    app.delete_snapshot = None;
+    app.form = Some(FormState {
+        kind: FormKind::ReplaceSecret,
+        fields: vec![
+            FormField::secret("New secret"),
+            FormField::text("Content type", "text/plain"),
+        ],
+        attributes: Attributes::new(),
+        selected_attribute: 0,
+        editing_attribute_key: None,
+        selected_field: 0,
+        selected_button: 0,
+        scroll: 0,
+        focus_buttons: false,
+        target_item_path: Some(item.path),
+        parent: None,
+        message:
+            "Replace the secret value explicitly. Metadata is not changed and replacement is never automatically rolled back."
+                .into(),
         dirty: false,
     });
     app.page = Page::Form;
@@ -2257,7 +2520,14 @@ fn start_delete_item(app: &mut TuiApp) {
     let Some(item) = app.selected_item().cloned() else {
         return;
     };
-    app.reveal = None;
+    let Some(collection) = app.selected_collection().cloned() else {
+        return;
+    };
+    app.clear_reveal();
+    app.delete_snapshot = Some(DeleteSnapshot {
+        collection,
+        item: item.clone(),
+    });
     app.form = Some(FormState {
         kind: FormKind::DeleteItem,
         fields: Vec::new(),
@@ -2265,12 +2535,12 @@ fn start_delete_item(app: &mut TuiApp) {
         selected_attribute: 0,
         editing_attribute_key: None,
         selected_field: 0,
-        selected_button: 1,
+        selected_button: 0,
         scroll: 0,
         focus_buttons: true,
         target_item_path: Some(item.path),
         parent: None,
-        message: format!("Delete '{}' ? This cannot be undone.", item.label),
+        message: "Review the captured metadata before deleting.".into(),
         dirty: false,
     });
     app.page = Page::Form;
@@ -2284,9 +2554,11 @@ async fn submit_new_collection(store: &impl SecretStore, app: &mut TuiApp) -> Re
         return Ok(());
     }
     let alias = form_value(app, 1).trim().to_owned();
-    let collection = store
+    let outcome = store
         .create_collection(NewCollection { label, alias })
         .await?;
+    let message = outcome_message("collection created", &outcome);
+    let collection = outcome.value;
     clear_form_secrets(app);
     app.form = None;
     app.refresh_all(store).await?;
@@ -2298,7 +2570,7 @@ async fn submit_new_collection(store: &impl SecretStore, app: &mut TuiApp) -> Re
         app.selected_collection = index;
     }
     app.page = Page::Collections;
-    app.message = "collection created".into();
+    app.message = message;
     app.sync_states();
     Ok(())
 }
@@ -2320,7 +2592,7 @@ async fn submit_new_item(store: &impl SecretStore, app: &mut TuiApp) -> Result<(
         .unwrap_or_default();
     let secret = SecretBytes::new(form_value(app, 2).into_bytes());
     let content_type = non_empty_or(form_value(app, 3), "text/plain");
-    let item = store
+    let outcome = store
         .create_item(NewItem {
             collection_path: collection.path,
             label,
@@ -2329,6 +2601,8 @@ async fn submit_new_item(store: &impl SecretStore, app: &mut TuiApp) -> Result<(
             content_type,
         })
         .await?;
+    let message = outcome_message("item created", &outcome);
+    let item = outcome.value;
     clear_form_secrets(app);
     app.form = None;
     app.refresh_items(store).await?;
@@ -2340,7 +2614,7 @@ async fn submit_new_item(store: &impl SecretStore, app: &mut TuiApp) -> Result<(
         app.selected_item = index;
     }
     app.page = Page::Items;
-    app.message = "item created".into();
+    app.message = message;
     app.sync_states();
     Ok(())
 }
@@ -2352,8 +2626,21 @@ async fn submit_edit_item(store: &impl SecretStore, app: &mut TuiApp) -> Result<
     let Some(item_path) = form.target_item_path.clone() else {
         return Ok(());
     };
-    let label = form_value(app, 0).trim().to_owned();
-    if label.is_empty() {
+    let Some(original) = app
+        .items
+        .iter()
+        .find(|item| item.path == item_path)
+        .cloned()
+    else {
+        set_form_message(
+            app,
+            "The item is no longer available. Refresh before editing.",
+        );
+        return Ok(());
+    };
+    let target = ItemTarget::from(&original);
+    let label = form_value(app, 0);
+    if label.trim().is_empty() {
         set_form_message(app, "Label is required.");
         set_form_field_error(app, 0, "required");
         return Ok(());
@@ -2363,13 +2650,112 @@ async fn submit_edit_item(store: &impl SecretStore, app: &mut TuiApp) -> Result<
         .as_ref()
         .map(|form| form.attributes.clone())
         .unwrap_or_default();
-    let secret = SecretBytes::new(form_value(app, 2).into_bytes());
-    let content_type = non_empty_or(form_value(app, 3), "text/plain");
-    let secret_ref =
-        (!secret.as_slice().is_empty()).then_some((secret.as_slice(), content_type.as_str()));
-    store
-        .edit_item(&item_path, Some(&label), Some(attributes), secret_ref)
-        .await?;
+    let label_changed = label != original.label;
+    let attributes_changed = attributes != original.attributes;
+    let mut operations = Vec::new();
+    let mut warnings = Vec::new();
+    let mut post_label_snapshot = None;
+    let mut post_label_snapshot_issue = None;
+
+    if label_changed || attributes_changed {
+        let current = store
+            .list_items(&target.collection_path)
+            .await?
+            .into_iter()
+            .find(|item| item.path == target.item_path);
+        if current.as_ref() != Some(&original) {
+            set_form_message(
+                app,
+                "Edit blocked: the item disappeared or its metadata changed after this form opened. Cancel and review the current item.",
+            );
+            return Ok(());
+        }
+    }
+
+    if label_changed {
+        let outcome = store.set_item_label(&target, &label).await?;
+        warnings.extend(outcome.warnings);
+        operations.push("label");
+        match store.list_items(&target.collection_path).await {
+            Ok(items) => {
+                post_label_snapshot = items.into_iter().find(|item| {
+                    item.path == target.item_path
+                        && item.collection_path == original.collection_path
+                        && item.label == label
+                        && item.attributes == original.attributes
+                        && item.locked == original.locked
+                        && item.created == original.created
+                });
+                if post_label_snapshot.is_none() {
+                    post_label_snapshot_issue = Some(
+                        "the fresh object did not retain the original attributes, lock state, and creation identity"
+                            .into(),
+                    );
+                }
+            }
+            Err(error) => {
+                post_label_snapshot_issue = Some(format!("the fresh read failed: {error:#}"));
+            }
+        }
+    }
+
+    if attributes_changed {
+        if label_changed {
+            let Some(post_label_snapshot) = post_label_snapshot.as_ref() else {
+                let issue = post_label_snapshot_issue
+                    .as_deref()
+                    .unwrap_or("no matching object was returned");
+                clear_form_secrets(app);
+                return Err(anyhow::anyhow!(
+                    "partial edit: the label changed, but attributes were not attempted because the post-label concurrency check was unavailable: {issue}"
+                ));
+            };
+            let refreshed = store
+                .list_items(&target.collection_path)
+                .await?
+                .into_iter()
+                .find(|item| item.path == target.item_path);
+            if refreshed.as_ref() != Some(post_label_snapshot) {
+                clear_form_secrets(app);
+                return Err(anyhow::anyhow!(
+                    "partial edit: the label changed, but attributes were not attempted because a fresh read found a concurrent change"
+                ));
+            }
+        }
+        match store.set_item_attributes(&target, attributes.clone()).await {
+            Ok(outcome) => {
+                warnings.extend(outcome.warnings);
+                operations.push("attributes");
+            }
+            Err(attributes_error) if label_changed => {
+                let rollback = rollback_label_if_unchanged(
+                    store,
+                    &target,
+                    &original.label,
+                    post_label_snapshot.as_ref(),
+                    post_label_snapshot_issue.as_deref(),
+                )
+                .await;
+                let prior_warnings = if warnings.is_empty() {
+                    String::new()
+                } else {
+                    format!("; warnings before failure: {}", warning_text(&warnings))
+                };
+                clear_form_secrets(app);
+                return Err(anyhow::anyhow!(
+                    "the attribute operation failed or could not be verified after the label was applied; attributes may already have changed: {attributes_error:#}; {rollback}{prior_warnings}"
+                ));
+            }
+            Err(attributes_error) => return Err(attributes_error),
+        }
+    }
+
+    let success = if operations.is_empty() {
+        "item already matched the submitted metadata; no changes applied".into()
+    } else {
+        format!("item edited: {} changed", operations.join(", "))
+    };
+    let message = message_with_warnings(success, &warnings);
     clear_form_secrets(app);
     app.form = None;
     app.refresh_items(store).await?;
@@ -2381,12 +2767,12 @@ async fn submit_edit_item(store: &impl SecretStore, app: &mut TuiApp) -> Result<
         app.selected_item = index;
     }
     app.page = Page::Details;
-    app.message = "item edited".into();
+    app.message = message;
     app.sync_states();
     Ok(())
 }
 
-async fn submit_delete_item(store: &impl SecretStore, app: &mut TuiApp) -> Result<()> {
+async fn submit_replace_secret(store: &impl SecretStore, app: &mut TuiApp) -> Result<()> {
     let Some(item_path) = app
         .form
         .as_ref()
@@ -2394,14 +2780,162 @@ async fn submit_delete_item(store: &impl SecretStore, app: &mut TuiApp) -> Resul
     else {
         return Ok(());
     };
-    store.delete_item(&item_path).await?;
+    let Some(item) = app
+        .items
+        .iter()
+        .find(|item| item.path == item_path)
+        .cloned()
+    else {
+        set_form_message(
+            app,
+            "The item is no longer available. Refresh before replacing its secret.",
+        );
+        return Ok(());
+    };
+    let secret = SecretBytes::new(form_value(app, 0).into_bytes());
+    if secret.as_slice().is_empty() {
+        set_form_message(app, "New secret is required.");
+        set_form_field_error(app, 0, "required");
+        return Ok(());
+    }
+    let content_type = non_empty_or(form_value(app, 1), "text/plain");
+    let current = store
+        .list_items(&item.collection_path)
+        .await?
+        .into_iter()
+        .find(|current| current.path == item.path);
+    if current.as_ref() != Some(&item) {
+        set_form_message(
+            app,
+            "Secret replacement blocked: the item disappeared or its metadata changed after this form opened. Cancel and review the current item.",
+        );
+        return Ok(());
+    }
+    let outcome = store
+        .replace_item_secret(&ItemTarget::from(&item), secret.as_slice(), &content_type)
+        .await?;
+    let message = outcome_message(
+        "secret replaced; metadata was unchanged and no automatic rollback was attempted",
+        &outcome,
+    );
+
     clear_form_secrets(app);
     app.form = None;
     app.refresh_items(store).await?;
-    app.page = Page::Items;
-    app.message = "item deleted".into();
+    if let Some(index) = app
+        .items
+        .iter()
+        .position(|existing| existing.path == item_path)
+    {
+        app.selected_item = index;
+    }
+    app.page = Page::Details;
+    app.message = message;
     app.sync_states();
     Ok(())
+}
+
+async fn submit_delete_item(store: &impl SecretStore, app: &mut TuiApp) -> Result<()> {
+    let Some(snapshot) = app.delete_snapshot.clone() else {
+        return Ok(());
+    };
+    let current_collection = store
+        .list_collections()
+        .await?
+        .into_iter()
+        .find(|collection| collection.path == snapshot.collection.path);
+    if current_collection.as_ref() != Some(&snapshot.collection) {
+        set_form_message(
+            app,
+            "Deletion blocked: the collection disappeared or its metadata changed after this confirmation opened. Cancel and review the current collection.",
+        );
+        return Ok(());
+    }
+    let current = store
+        .list_items(&snapshot.collection.path)
+        .await?
+        .into_iter()
+        .find(|item| item.path == snapshot.item.path);
+    if current.as_ref() != Some(&snapshot.item) {
+        set_form_message(
+            app,
+            "Deletion blocked: the item disappeared or its metadata changed after this confirmation opened. Cancel and review the current item.",
+        );
+        return Ok(());
+    }
+
+    let outcome = store.delete_item(&ItemTarget::from(&snapshot.item)).await?;
+    let message = outcome_message("item deleted", &outcome);
+    clear_form_secrets(app);
+    app.form = None;
+    app.delete_snapshot = None;
+    app.refresh_items(store).await?;
+    app.page = Page::Items;
+    app.message = message;
+    app.sync_states();
+    Ok(())
+}
+
+async fn rollback_label_if_unchanged(
+    store: &impl SecretStore,
+    target: &ItemTarget,
+    original_label: &str,
+    post_label_snapshot: Option<&ItemInfo>,
+    post_label_snapshot_issue: Option<&str>,
+) -> String {
+    let Some(post_label_snapshot) = post_label_snapshot else {
+        return format!(
+            "label rollback was skipped because the post-label state could not be verified: {}",
+            post_label_snapshot_issue.unwrap_or("no matching object was returned")
+        );
+    };
+    let refreshed = match store.list_items(&target.collection_path).await {
+        Ok(items) => items,
+        Err(error) => {
+            return format!(
+                "label rollback was skipped because a fresh concurrency check failed: {error:#}"
+            );
+        }
+    };
+    if refreshed
+        .into_iter()
+        .find(|item| item.path == target.item_path)
+        .as_ref()
+        != Some(post_label_snapshot)
+    {
+        return "label rollback was skipped because a fresh read found a concurrent change".into();
+    }
+    match store.set_item_label(target, original_label).await {
+        Ok(outcome) if outcome.warnings.is_empty() => "the label rollback completed".into(),
+        Ok(outcome) => format!(
+            "the label rollback completed with warnings: {}",
+            warning_text(&outcome.warnings)
+        ),
+        Err(error) => format!("the label rollback failed: {error:#}"),
+    }
+}
+
+fn outcome_message<T>(success: &str, outcome: &StoreOutcome<T>) -> String {
+    message_with_warnings(success.into(), &outcome.warnings)
+}
+
+fn message_with_warnings(success: String, warnings: &[crate::store::StoreWarning]) -> String {
+    if warnings.is_empty() {
+        success
+    } else {
+        format!(
+            "{success}; WARNING: operation succeeded but cleanup needs attention: {}",
+            warning_text(warnings)
+        )
+    }
+}
+
+fn warning_text(warnings: &[crate::store::StoreWarning]) -> String {
+    warnings
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn set_form_message(app: &mut TuiApp, message: &str) {
@@ -2467,7 +3001,10 @@ fn non_empty_or(value: String, fallback: &str) -> String {
 async fn reveal_selected(store: &impl SecretStore, app: &mut TuiApp) -> Result<()> {
     if let Some(item) = app.selected_item() {
         let item_path = item.path.clone();
-        let value = store.reveal_secret(&item_path).await?;
+        let target = ItemTarget::from(item);
+        let outcome = store.reveal_secret(&target).await?;
+        let message = outcome_message("secret revealed for 30s", &outcome);
+        let value = outcome.value;
         app.secret_metadata = Some(secret_metadata(&item_path, &value));
         app.reveal = Some(RevealState {
             item_path,
@@ -2475,7 +3012,7 @@ async fn reveal_selected(store: &impl SecretStore, app: &mut TuiApp) -> Result<(
             expires_at: Instant::now() + SECRET_TTL,
         });
         app.page = Page::Details;
-        app.message = "secret revealed for 30s".into();
+        app.message = message;
         app.reveal_scroll_pending = true;
     }
     Ok(())
@@ -2514,7 +3051,14 @@ async fn copy_selected(
 ) -> Result<()> {
     if let Some(item) = app.selected_item() {
         let item_path = item.path.clone();
-        let value = store.reveal_secret(&item_path).await?;
+        let target = ItemTarget::from(item);
+        let outcome = store.reveal_secret(&target).await?;
+        let warning_suffix = if outcome.warnings.is_empty() {
+            String::new()
+        } else {
+            format!("; WARNING: {}", warning_text(&outcome.warnings))
+        };
+        let value = outcome.value;
         app.secret_metadata = Some(secret_metadata(&item_path, &value));
         let expected = encode_clipboard(value.secret.as_slice(), encoding)?;
         let clipboard = match app.clipboard.as_mut() {
@@ -2527,8 +3071,9 @@ async fn copy_selected(
             expires_at: Instant::now() + SECRET_TTL,
         });
         app.message = format!(
-            "copied as {}; clipboard clear scheduled for 30s",
-            encoding.label()
+            "copied as {}; clipboard clear scheduled for 30s{}",
+            encoding.label(),
+            warning_suffix
         );
     }
     Ok(())
@@ -2587,12 +3132,13 @@ impl ArboardClipboard {
 
 async fn lock_toggle(store: &impl SecretStore, app: &mut TuiApp) -> Result<()> {
     if let Some(collection) = app.selected_collection().cloned() {
-        app.reveal = None;
-        store
+        app.clear_reveal();
+        let outcome = store
             .set_collection_locked(&collection.path, !collection.locked)
             .await?;
+        let message = outcome_message("collection lock state changed", &outcome);
         app.refresh_all(store).await?;
-        app.message = "collection lock state changed".into();
+        app.message = message;
     }
     Ok(())
 }
@@ -2600,6 +3146,7 @@ async fn lock_toggle(store: &impl SecretStore, app: &mut TuiApp) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::MemorySecretStore;
     use ratatui::{backend::TestBackend, Terminal};
 
     fn sample_app() -> TuiApp {
@@ -2641,6 +3188,19 @@ mod tests {
         )
     }
 
+    fn sample_store(app: &TuiApp) -> MemorySecretStore {
+        let store = MemorySecretStore::new();
+        for collection in &app.collections {
+            store.insert_collection(collection.clone());
+        }
+        for item in &app.items {
+            store
+                .insert_item(item.clone(), b"secret".to_vec(), "text/plain")
+                .unwrap();
+        }
+        store
+    }
+
     #[test]
     fn filter_checks_label_path_and_attrs() {
         let mut app = sample_app();
@@ -2658,6 +3218,43 @@ mod tests {
         assert_eq!(app.page, Page::Details);
         app.previous_page();
         assert_eq!(app.page, Page::Items);
+    }
+
+    #[test]
+    fn details_default_action_is_back() {
+        let mut app = sample_app();
+        app.page = Page::Items;
+        app.next_page();
+        assert_eq!(app.page, Page::Details);
+        assert_eq!(app.selected_action(), DetailAction::Back);
+    }
+
+    #[tokio::test]
+    async fn reveal_requires_explicit_r_or_deliberate_action_selection() {
+        let mut app = sample_app();
+        let store = sample_store(&app);
+        app.page = Page::Details;
+        app.selected_action = 0;
+
+        handle_key(
+            &store,
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.page, Page::Items);
+        assert!(app.reveal.is_none());
+
+        app.page = Page::Details;
+        handle_key(
+            &store,
+            &mut app,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        assert!(app.reveal.is_some());
     }
 
     #[test]
@@ -2687,6 +3284,40 @@ mod tests {
         app.filter = "Alpha".into();
         app.clamp_item_selection();
         assert_eq!(app.selected_item, 0);
+    }
+
+    #[test]
+    fn selection_filter_and_navigation_clear_revealed_secret() {
+        fn set_reveal(app: &mut TuiApp) {
+            app.reveal = Some(RevealState {
+                item_path: "p1".into(),
+                value: secret_value(b"secret", "text/plain"),
+                expires_at: Instant::now() + SECRET_TTL,
+            });
+        }
+
+        let mut app = sample_app();
+        app.page = Page::Items;
+        set_reveal(&mut app);
+        app.move_selection(1);
+        assert!(app.reveal.is_none());
+
+        set_reveal(&mut app);
+        app.jump_selection(false);
+        assert!(app.reveal.is_none());
+
+        set_reveal(&mut app);
+        app.mode = InputMode::Search;
+        handle_search_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        );
+        assert!(app.reveal.is_none());
+
+        set_reveal(&mut app);
+        app.page = Page::Details;
+        app.previous_page();
+        assert!(app.reveal.is_none());
     }
 
     #[test]
@@ -2863,7 +3494,7 @@ mod tests {
         form_down(&mut app);
         assert_eq!(app.form.as_ref().unwrap().selected_attribute, 1);
         form_down(&mut app);
-        assert_eq!(app.form.as_ref().unwrap().selected_field, 2);
+        assert!(app.form.as_ref().unwrap().focus_buttons);
         form_up(&mut app);
         let form = app.form.as_ref().unwrap();
         assert_eq!(form.selected_field, 1);
@@ -2895,15 +3526,183 @@ mod tests {
     }
 
     #[test]
-    fn new_and_edit_item_content_type_defaults_to_text_plain() {
+    fn new_item_and_secret_replacement_content_type_default_to_text_plain() {
         let mut app = sample_app();
         start_new_item(&mut app);
         assert_eq!(form_value(&app, 3), "text/plain");
         assert_eq!(non_empty_or("  ".into(), "text/plain"), "text/plain");
 
         app.form = None;
+        start_replace_secret(&mut app);
+        assert_eq!(form_value(&app, 1), "text/plain");
+    }
+
+    #[test]
+    fn metadata_edit_and_secret_replacement_are_separate_forms() {
+        let mut app = sample_app();
         start_edit_item(&mut app);
-        assert_eq!(form_value(&app, 3), "text/plain");
+        let edit = app.form.as_ref().unwrap();
+        assert_eq!(edit.kind, FormKind::EditItem);
+        assert_eq!(edit.fields.len(), 2);
+        assert!(edit.fields.iter().all(|field| !field.secret));
+
+        app.form = None;
+        app.page = Page::Details;
+        start_replace_secret(&mut app);
+        let replacement = app.form.as_ref().unwrap();
+        assert_eq!(replacement.kind, FormKind::ReplaceSecret);
+        assert_eq!(replacement.fields.len(), 2);
+        assert!(replacement.fields[0].secret);
+        assert!(replacement.attributes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn replacement_calls_only_secret_mutation_and_keeps_label_and_attributes() {
+        let mut app = sample_app();
+        let original = app.items[0].clone();
+        let store = sample_store(&app);
+        store.clear_log();
+        app.page = Page::Details;
+        start_replace_secret(&mut app);
+        app.form.as_mut().unwrap().fields[0].value = "replacement".into();
+        submit_replace_secret(&store, &mut app).await.unwrap();
+
+        let updated = store.item("p1").unwrap();
+        assert_eq!(updated.label, original.label);
+        assert_eq!(updated.attributes, original.attributes);
+        assert_eq!(updated.collection_path, original.collection_path);
+        let mutation_operations = store
+            .mutation_log()
+            .into_iter()
+            .map(|entry| entry.operation)
+            .filter(|operation| {
+                matches!(
+                    operation,
+                    crate::store::StoreOperation::SetItemLabel
+                        | crate::store::StoreOperation::SetItemAttributes
+                        | crate::store::StoreOperation::ReplaceItemSecret
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            mutation_operations,
+            [crate::store::StoreOperation::ReplaceItemSecret]
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_edit_applies_label_then_attributes_and_rolls_label_back_on_failure() {
+        let mut app = sample_app();
+        let original = app.items[0].clone();
+        let store = sample_store(&app);
+        store.inject_failure(
+            crate::store::StoreOperation::SetItemAttributes,
+            1,
+            "injected attributes failure",
+        );
+        app.page = Page::Details;
+        start_edit_item(&mut app);
+        let form = app.form.as_mut().unwrap();
+        form.fields[0].value = "new label".into();
+        form.attributes.insert("new".into(), "attribute".into());
+
+        let error = submit_edit_item(&store, &mut app).await.unwrap_err();
+        assert!(error.to_string().contains("label rollback completed"));
+        let updated = store.item("p1").unwrap();
+        assert_eq!(updated.label, original.label);
+        assert_eq!(updated.attributes, original.attributes);
+        let field_operations = store
+            .mutation_log()
+            .into_iter()
+            .map(|entry| entry.operation)
+            .filter(|operation| {
+                matches!(
+                    operation,
+                    crate::store::StoreOperation::SetItemLabel
+                        | crate::store::StoreOperation::SetItemAttributes
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            field_operations,
+            [
+                crate::store::StoreOperation::SetItemLabel,
+                crate::store::StoreOperation::SetItemAttributes,
+                crate::store::StoreOperation::SetItemLabel,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_edit_preflight_blocks_stale_form_with_zero_writes() {
+        let mut app = sample_app();
+        let store = sample_store(&app);
+        app.page = Page::Details;
+        start_edit_item(&mut app);
+        app.form
+            .as_mut()
+            .unwrap()
+            .attributes
+            .insert("draft".into(), "value".into());
+        let target = ItemTarget::from(&app.items[0]);
+        store
+            .set_item_label(&target, "changed elsewhere")
+            .await
+            .unwrap();
+        store.clear_log();
+
+        submit_edit_item(&store, &mut app).await.unwrap();
+
+        assert!(app.form.as_ref().unwrap().message.contains("Edit blocked"));
+        assert_eq!(store.item("p1").unwrap().label, "changed elsewhere");
+        assert!(store.mutation_log().iter().all(|entry| !matches!(
+            entry.operation,
+            crate::store::StoreOperation::SetItemLabel
+                | crate::store::StoreOperation::SetItemAttributes
+        )));
+    }
+
+    #[tokio::test]
+    async fn metadata_rollback_is_skipped_when_post_label_read_has_concurrent_drift() {
+        let mut app = sample_app();
+        let store = sample_store(&app);
+        store.set_delay(
+            crate::store::StoreOperation::ListItems,
+            Duration::from_millis(50),
+        );
+        store.inject_failure(
+            crate::store::StoreOperation::SetItemAttributes,
+            1,
+            "injected attributes failure",
+        );
+        app.page = Page::Details;
+        start_edit_item(&mut app);
+        let form = app.form.as_mut().unwrap();
+        form.fields[0].value = "new label".into();
+        form.attributes.insert("draft".into(), "attribute".into());
+
+        let concurrent_store = store.clone();
+        let concurrent = tokio::spawn(async move {
+            // The first delayed read is the preflight. Drift during the second, post-label read.
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            let mut item = concurrent_store.item("p1").unwrap();
+            item.attributes.insert("concurrent".into(), "change".into());
+            item.modified = Some(999);
+            concurrent_store.update_item_info(item).unwrap();
+        });
+        let error = submit_edit_item(&store, &mut app).await.unwrap_err();
+        concurrent.await.unwrap();
+
+        assert!(error
+            .to_string()
+            .contains("post-label concurrency check was unavailable"));
+        let updated = store.item("p1").unwrap();
+        assert_eq!(updated.label, "new label");
+        assert_eq!(updated.attributes["concurrent"], "change");
+        assert!(!store
+            .mutation_log()
+            .iter()
+            .any(|entry| { entry.operation == crate::store::StoreOperation::SetItemAttributes }));
     }
 
     #[test]
@@ -3108,11 +3907,119 @@ mod tests {
             "Copy Text",
             "Copy Base64",
             "Copy Hex",
-            "Edit",
+            "Edit Metadata",
+            "Replace Secret",
             "Delete",
             "Lock",
         ] {
             assert!(rendered.contains(label));
         }
+    }
+
+    #[test]
+    fn delete_confirmation_is_cancel_first_and_shows_safe_snapshot() {
+        let mut app = sample_app();
+        app.collections[0].label = "Wallet\x1b[31m".into();
+        app.items[0].label = "Important\nitem\u{202e}".into();
+        app.items[0]
+            .attributes
+            .insert("user\tname".into(), "john\\admin".into());
+        app.page = Page::Details;
+        start_delete_item(&mut app);
+
+        let form = app.form.as_ref().unwrap();
+        assert_eq!(form.buttons(), &["Cancel", "Delete"]);
+        assert_eq!(form.selected_button, 0);
+        let rendered = delete_confirmation_lines(&form.message, app.delete_snapshot.as_ref(), 120)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Wallet\\x1b[31m"), "{rendered}");
+        assert!(rendered.contains("Important\\nitem\\u{202e}"), "{rendered}");
+        assert!(rendered.contains("user\\tname=john\\\\admin"), "{rendered}");
+        assert!(
+            rendered.contains("cannot restore a deleted secret"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains('\x1b'));
+        assert!(!rendered.contains('\u{202e}'));
+    }
+
+    #[tokio::test]
+    async fn delete_is_blocked_when_snapshot_drifts() {
+        let mut app = sample_app();
+        let store = sample_store(&app);
+        app.page = Page::Details;
+        start_delete_item(&mut app);
+        let target = ItemTarget::from(&app.delete_snapshot.as_ref().unwrap().item);
+        store
+            .set_item_label(&target, "changed elsewhere")
+            .await
+            .unwrap();
+
+        // A deliberate move from the initially selected Cancel button is required.
+        form_move_button(&mut app, 1);
+        submit_or_cancel_form(&store, &mut app).await.unwrap();
+
+        assert!(store.item("p1").is_some());
+        let form = app.form.as_ref().unwrap();
+        assert_eq!(form.kind, FormKind::DeleteItem);
+        assert!(form.message.contains("Deletion blocked"));
+    }
+
+    #[test]
+    fn details_escape_provider_errors_controls_and_bidi() {
+        let mut app = sample_app();
+        app.message = "provider\x1b[2J failed\nnext\u{0085}\u{202e}".into();
+        app.collections[0].label = "normal 日本語 e\u{301}".into();
+        app.items[0].attributes.insert(
+            "control\tkey".into(),
+            "right-to-left مرحبا \u{2066}value\u{2069}".into(),
+        );
+
+        let rendered = detail_lines(&app)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("provider\\x1b[2J failed\\nnext\\u{85}\\u{202e}"));
+        assert!(rendered.contains("normal 日本語 e\u{301}"));
+        assert!(rendered.contains("control\\tkey"));
+        assert!(rendered.contains("مرحبا \\u{2066}value\\u{2069}"));
+        assert!(!rendered.contains('\x1b'));
+        assert!(!rendered.contains('\u{0085}'));
+        assert!(!rendered.contains('\u{202e}'));
+        assert!(!rendered.contains('\u{2066}'));
+        assert!(!rendered.contains('\u{2069}'));
+        let rendered_header = header(&app);
+        assert!(rendered_header.contains("status: provider\\x1b[2J failed\\nnext"));
+        assert!(!rendered_header.contains('\x1b'));
+        assert!(!rendered_header.contains('\u{202e}'));
+    }
+
+    #[test]
+    fn details_bound_attribute_count_and_value_lengths() {
+        let mut app = sample_app();
+        app.items[0].attributes.clear();
+        for index in 0..300 {
+            app.items[0]
+                .attributes
+                .insert(format!("key-{index:03}"), "x".repeat(1_000));
+        }
+        let rendered = detail_lines(&app)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("44 attribute(s) not displayed")));
+        assert!(!rendered.iter().any(|line| line.contains("key-299")));
+        let first_value = rendered
+            .iter()
+            .find(|line| line.contains("key-000="))
+            .unwrap();
+        assert!(first_value.contains("1000 bytes; sha256="));
+        assert!(first_value.graphemes(true).count() <= 2 + 256 + 1 + 512);
     }
 }

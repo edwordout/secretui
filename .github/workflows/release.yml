@@ -5,6 +5,9 @@ on:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
 
+permissions:
+  contents: read
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -14,25 +17,28 @@ env:
 
 jobs:
   build:
-    name: Build release assets
+    name: Build and validate release assets
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
 
       - name: Install pinned Rust toolchain
         run: |
           rustup show
           rustup target add "$TARGET"
 
-      - name: Verify tag matches package version
+      - name: Verify tag and changelog match package version
         shell: bash
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Tag must be a semantic version such as v0.1.0: $tag" >&2
+            echo "Tag must be a semantic version such as v0.1.2: $tag" >&2
             exit 1
           fi
 
@@ -42,6 +48,12 @@ jobs:
             echo "Tag $tag does not match Cargo.toml version $package_version" >&2
             exit 1
           fi
+          if [[ "$(git cat-file -t "refs/tags/$tag")" != tag ]]; then
+            echo "Release tag $tag must be annotated" >&2
+            exit 1
+          fi
+          test "$(git rev-parse "refs/tags/$tag^{}")" = "$(git rev-parse HEAD)"
+          grep -Eq "^## \[$package_version\]( |$)" CHANGELOG.md
 
       - name: Check formatting
         run: cargo fmt --check
@@ -51,24 +63,88 @@ jobs:
         run: cargo test --locked --all-targets
       - name: Check documentation
         run: RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps
+      - name: Audit dependencies
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
       - name: Build release binary
         run: cargo build --locked --release --target "$TARGET"
 
-      - name: Package release
+      - name: Smoke-test release interfaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/$TARGET/release/secretui"
+          test "$($binary --version)" = "secretui ${GITHUB_REF_NAME#v}"
+          "$binary" --help >/dev/null
+          "$binary" export --help >/dev/null
+          "$binary" import --help >/dev/null
+          "$binary" man >/tmp/secretui.1
+          "$binary" completions bash >/tmp/secretui.bash
+          test -s /tmp/secretui.1
+          test -s /tmp/secretui.bash
+
+      - name: Verify documented glibc baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/$TARGET/release/secretui"
+          newest_glibc="$(readelf --version-info "$binary" \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+            | sort -Vu \
+            | tail -1)"
+          test -n "$newest_glibc"
+          if [[ "$(printf '%s\n' "$newest_glibc" GLIBC_2.34 | sort -V | tail -1)" != "GLIBC_2.34" ]]; then
+            echo "Binary requires $newest_glibc, newer than documented GLIBC_2.34" >&2
+            exit 1
+          fi
+
+      - name: Test clean locked installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_root="$(mktemp -d)"
+          trap 'rm -rf "$install_root"' EXIT
+          CARGO_TARGET_DIR="$install_root/target" \
+            cargo install --path . --locked --root "$install_root/root"
+          test "$("$install_root/root/bin/secretui" --version)" = \
+            "secretui ${GITHUB_REF_NAME#v}"
+
+      - name: Package release and changelog notes
         shell: bash
         run: |
           set -euo pipefail
           package_name="secretui-${GITHUB_REF_NAME}-${TARGET}"
           package_dir="dist/$package_name"
           archive="dist/$package_name.tar.gz"
+          source_date_epoch="$(git log -1 --format=%ct)"
 
           mkdir -p "$package_dir"
           install -m 755 "target/$TARGET/release/secretui" "$package_dir/secretui"
           "target/$TARGET/release/secretui" man > "$package_dir/secretui.1"
           "target/$TARGET/release/secretui" completions bash > "$package_dir/secretui.bash"
-          install -m 644 README.md LICENSE-APACHE LICENSE-MIT "$package_dir/"
+          chmod 644 "$package_dir/secretui.1" "$package_dir/secretui.bash"
+          install -m 644 \
+            ss.png README.md SECURITY.md CHANGELOG.md METADATA.md RELEASE.md \
+            LICENSE-APACHE LICENSE-MIT "$package_dir/"
 
-          tar -C dist -czf "$archive" "$package_name"
+          version="${GITHUB_REF_NAME#v}"
+          awk -v version="$version" '
+            $0 ~ "^## \\[" version "\\]( |$)" { found = 1; next }
+            found && $0 ~ "^## \\[" { exit }
+            found { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > dist/release-notes.md
+          test -s dist/release-notes.md
+
+          find "$package_dir" -print0 \
+            | xargs -0 touch --no-dereference --date="@$source_date_epoch"
+          tar --sort=name \
+            --mtime="@$source_date_epoch" \
+            --owner=0 --group=0 --numeric-owner \
+            --pax-option=delete=atime,delete=ctime \
+            -C dist -cf - "$package_name" \
+            | gzip -n -9 > "$archive"
           (cd dist && sha256sum "$package_name.tar.gz" > SHA256SUMS)
 
       - name: Validate release assets
@@ -84,8 +160,12 @@ jobs:
           tar -C release-check -xzf "dist/$archive"
 
           test -x "release-check/$package_name/secretui"
-          for file in secretui.1 secretui.bash README.md LICENSE-APACHE LICENSE-MIT; do
+          test "$(stat -c %a "release-check/$package_name/secretui")" = 755
+          for file in \
+            secretui.1 secretui.bash ss.png README.md SECURITY.md CHANGELOG.md \
+            METADATA.md RELEASE.md LICENSE-APACHE LICENSE-MIT; do
             test -s "release-check/$package_name/$file"
+            test "$(stat -c %a "release-check/$package_name/$file")" = 644
           done
           test "$("release-check/$package_name/secretui" --version)" = \
             "secretui ${GITHUB_REF_NAME#v}"
@@ -95,7 +175,12 @@ jobs:
             "$package_name/secretui" \
             "$package_name/secretui.1" \
             "$package_name/secretui.bash" \
+            "$package_name/ss.png" \
             "$package_name/README.md" \
+            "$package_name/SECURITY.md" \
+            "$package_name/CHANGELOG.md" \
+            "$package_name/METADATA.md" \
+            "$package_name/RELEASE.md" \
             "$package_name/LICENSE-APACHE" \
             "$package_name/LICENSE-MIT" | sort)"
           actual_contents="$(tar -tzf "dist/$archive" | sort)"
@@ -108,12 +193,14 @@ jobs:
           path: |
             dist/secretui-${{ github.ref_name }}-${{ env.TARGET }}.tar.gz
             dist/SHA256SUMS
+            dist/release-notes.md
           if-no-files-found: error
 
   publish:
     name: Publish GitHub release
     needs: build
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     permissions:
       actions: read
       contents: write
@@ -124,7 +211,7 @@ jobs:
           name: release-assets
           path: dist
 
-      - name: Create draft release
+      - name: Create draft release from changelog
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -132,15 +219,18 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --draft \
-            --generate-notes \
+            --verify-tag \
+            --notes-file dist/release-notes.md \
             --title "$GITHUB_REF_NAME"
 
-      - name: Upload assets and publish release
+      - name: Upload verified assets and publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release upload "$GITHUB_REF_NAME" dist/* \
+          gh release upload "$GITHUB_REF_NAME" \
+            "dist/secretui-${GITHUB_REF_NAME}-${TARGET}.tar.gz" \
+            dist/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY"
           gh release edit "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \

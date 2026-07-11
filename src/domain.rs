@@ -74,13 +74,6 @@ pub struct MetadataFile {
     pub collections: Vec<CollectionMetadata>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct MetadataImportSummary {
-    pub collections_changed: usize,
-    pub items_changed: usize,
-    pub paths_missing: usize,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CollectionMetadata {
     pub path: String,
