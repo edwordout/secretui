@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TARGET: x86_64-unknown-linux-gnu
+
+jobs:
+  build:
+    name: Build release assets
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup show
+          rustup target add "$TARGET"
+
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Tag must be a semantic version such as v0.1.0: $tag" >&2
+            exit 1
+          fi
+
+          package_version="$({ cargo metadata --locked --no-deps --format-version 1; } | jq -r \
+            '.packages[] | select(.name == "secretui") | .version')"
+          if [[ "v$package_version" != "$tag" ]]; then
+            echo "Tag $tag does not match Cargo.toml version $package_version" >&2
+            exit 1
+          fi
+
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Run tests
+        run: cargo test --locked --all-targets
+      - name: Check documentation
+        run: RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps
+      - name: Build release binary
+        run: cargo build --locked --release --target "$TARGET"
+
+      - name: Package release
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_name="secretui-${GITHUB_REF_NAME}-${TARGET}"
+          package_dir="dist/$package_name"
+          archive="dist/$package_name.tar.gz"
+
+          mkdir -p "$package_dir"
+          install -m 755 "target/$TARGET/release/secretui" "$package_dir/secretui"
+          "target/$TARGET/release/secretui" man > "$package_dir/secretui.1"
+          "target/$TARGET/release/secretui" completions bash > "$package_dir/secretui.bash"
+          install -m 644 README.md LICENSE-APACHE LICENSE-MIT "$package_dir/"
+
+          tar -C dist -czf "$archive" "$package_name"
+          (cd dist && sha256sum "$package_name.tar.gz" > SHA256SUMS)
+
+      - name: Validate release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_name="secretui-${GITHUB_REF_NAME}-${TARGET}"
+          archive="$package_name.tar.gz"
+
+          (cd dist && sha256sum -c SHA256SUMS)
+          rm -rf release-check
+          mkdir release-check
+          tar -C release-check -xzf "dist/$archive"
+
+          test -x "release-check/$package_name/secretui"
+          for file in secretui.1 secretui.bash README.md LICENSE-APACHE LICENSE-MIT; do
+            test -s "release-check/$package_name/$file"
+          done
+          test "$("release-check/$package_name/secretui" --version)" = \
+            "secretui ${GITHUB_REF_NAME#v}"
+
+          expected_contents="$(printf '%s\n' \
+            "$package_name/" \
+            "$package_name/secretui" \
+            "$package_name/secretui.1" \
+            "$package_name/secretui.bash" \
+            "$package_name/README.md" \
+            "$package_name/LICENSE-APACHE" \
+            "$package_name/LICENSE-MIT" | sort)"
+          actual_contents="$(tar -tzf "dist/$archive" | sort)"
+          test "$actual_contents" = "$expected_contents"
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-assets
+          path: |
+            dist/secretui-${{ github.ref_name }}-${{ env.TARGET }}.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-assets
+          path: dist
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --generate-notes \
+            --title "$GITHUB_REF_NAME"
+
+      - name: Upload assets and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY"
+          gh release edit "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            --prerelease=false

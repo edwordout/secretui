@@ -21,7 +21,25 @@ It is aimed at developers, terminal users, minimal desktop environments, support
 
 Requirements: Linux and a running Freedesktop Secret Service provider (such as KDE Wallet, GNOME Keyring, or KeePassXC). Source builds also require Rust 1.97.0 and `cargo` available on `PATH`.
 
-There are no prebuilt releases yet, so installation currently requires a source build.
+Prebuilt releases are available for x86-64 Linux. Download and verify one before
+installing it into your user-local binary directory:
+
+```bash
+VERSION=v0.1.0
+ARCHIVE="secretui-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+curl -fLO "https://github.com/edwordout/secretui/releases/download/${VERSION}/${ARCHIVE}"
+curl -fLO "https://github.com/edwordout/secretui/releases/download/${VERSION}/SHA256SUMS"
+sha256sum --check SHA256SUMS
+tar -xzf "$ARCHIVE"
+mkdir -p ~/.local/bin
+install -m755 "${ARCHIVE%.tar.gz}/secretui" ~/.local/bin/secretui
+secretui --version
+```
+
+The archive also includes the man page (`secretui.1`), Bash completion
+(`secretui.bash`), README, and license files.
+
+To build from source instead:
 
 Build and install from this repository:
 
@@ -39,6 +57,23 @@ cargo build --release --locked
 mkdir -p ~/.local/bin
 install -m755 target/release/secretui ~/.local/bin/secretui
 ```
+
+## Making a release
+
+Maintainers should update the version in `Cargo.toml` and `Cargo.lock`, commit it,
+and wait for CI on `main` to pass. Then create and push an annotated tag:
+
+```bash
+VERSION=v0.1.0
+git tag -a "$VERSION" -m "Release $VERSION"
+git push origin main
+git push origin "$VERSION"
+```
+
+The tag must exactly match the package version. Before the first release, enable
+immutable releases in the GitHub repository settings if that option is available.
+If publishing fails after the draft is created, delete the draft before rerunning
+the tag workflow.
 
 ## Development
 

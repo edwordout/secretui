@@ -8,13 +8,13 @@ jobs:
   quality:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Install pinned Rust toolchain
         run: rustup show
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --all-targets
-      - run: RUSTDOCFLAGS='-D warnings' cargo doc --no-deps
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-targets
+      - run: RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps
       - name: Audit dependencies
         run: |
           cargo install cargo-audit --locked
