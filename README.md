@@ -1,110 +1,79 @@
 # secretui
 
-**Inspect what applications actually stored.**
+**The credentials were there. The password manager said they weren't.**
 
-`secretui` is a keyboard-driven administration and troubleshooting tool for the
-Linux Secret Service API. It browses collections, inspects arbitrary item
-metadata, and performs deliberate maintenance without assuming a
-username/password schema.
+`secretui` is a keyboard-driven terminal interface for browsing, inspecting, and maintaining credentials stored through the Linux [Secret Service API](https://specifications.freedesktop.org/secret-service/latest/).
+
+It lets you see what applications actually stored (even when the provider's usual interface does not show it) and work with arbitrary labels and attributes without assuming that every credential is just a username and password.
 
 ![secretui Collections screen showing a KDE Wallet collection](ss.png)
 
-*Browse Secret Service collections and credentials without leaving the terminal.*
+## Why I built it
 
-The project began when application credentials stored through KWallet's Secret
-Service interface were not visible in KWallet Manager. It remains an
-administration workspace, **not a replacement password manager**.
+While working with [RustConn](https://github.com/totoshko88/RustConn), I found credentials in KWallet's Secret Service storage that were invisible in KWallet Manager.
 
-## v0.1 release contract
+The entries existed. Applications had created them. But the interface I expected to use could not show me what was there.
 
-SecretUI promises to:
+That sent me through D-Bus calls, attribute queries, and tools that worked only when I already knew what I was looking for. I wanted something simpler: open a terminal, browse the store, inspect the real record, and fix its metadata safely.
 
-- browse collection and item metadata without retrieving secret values;
-- retrieve a secret only after an explicit Reveal or Copy action;
-- keep label and attribute edits separate from secret replacement;
-- restore lock state after a temporary unlock during ordinary success and
-  failure paths, and report cleanup failures;
-- plan and apply **same-store metadata repair** by exact provider object path;
-- provide operation and target context for provider errors; and
-- keep secret values out of metadata exports, recovery files, apply reports,
-  rendered errors, and the in-memory store's operation log.
+That is what became `secretui`.
 
-SecretUI does **not** promise:
+The original problem is described in this [KDE discussion](https://discuss.kde.org/t/why-is-my-git-secret-not-visible-in-kwalletmanager-but-visible-in-seahorse-gui/43532).
 
-- password-manager features, encrypted secret backup, or secret migration;
-- recovery of a deleted secret (metadata exports cannot restore one);
-- cross-provider or cross-database metadata matching;
-- compatibility with every Secret Service implementation; or
-- protection from root, privileged or same-user processes, a compromised
-  provider/desktop/terminal, clipboard history, screen capture, crash dumps, or
-  physical access to an unlocked session.
+## What you can do
 
-See [SECURITY.md](SECURITY.md) for the threat model and private reporting route.
+With `secretui`, you can:
 
-## Why secretui?
+- browse Secret Service collections and items interactively;
+- search entries without knowing their attributes in advance;
+- inspect application-defined labels and arbitrary attributes;
+- create, rename, edit, and delete collections or items;
+- reveal or copy a secret only after an explicit action;
+- view text secrets safely or copy binary values as Base64 or hex;
+- export secret-free metadata for inspection;
+- preview and apply conflict-checked metadata repairs within the same provider database; and
+- use the same workflow locally, in a minimal desktop, or through a remote terminal that already has access to the user's Secret Service session.
 
-- `secret-tool` works well when the attributes to query are already known.
-- [`lssecret`](https://github.com/gileshuang/lssecret) lists stored metadata.
-- [KeepSecret](https://apps.kde.org/keepsecret/) provides a graphical Secret
-  Service-native interface.
-- `secretui` provides terminal navigation, schema-neutral metadata editing,
-  lock-aware secret actions, and deterministic same-store metadata repair.
+`secretui` is an administration and troubleshooting tool. It is not intended to replace a full password manager or an infrastructure secret manager.
 
-This is useful for developers, terminal users, support workflows, minimal
-desktops, and remote sessions that already have access to a Secret Service
-provider. For unattended or boot-time credentials, use a purpose-built system
-such as [systemd credentials](https://systemd.io/CREDENTIALS/), Vault, a cloud
-secret manager, or the platform's orchestrator secrets.
+## Where it fits
 
-## Runtime and compatibility
+Existing tools solve related (but different) problems:
 
-SecretUI requires:
-
-- Linux on x86-64 for the published binary;
-- a working user session D-Bus;
-- an active Freedesktop Secret Service provider;
-- a modern UTF-8 terminal with alternate-screen and keyboard-event support; and
-- access to a graphical session when the provider needs to show an unlock or
-  authorization prompt.
-
-It does not create a session bus, start a provider, or make graphical provider
-prompts work in a headless session. It communicates over D-Bus through the Rust
-[`secret-service`](https://docs.rs/secret-service/latest/secret_service/) crate
-and does not dynamically link to C `libsecret`.
-
-The v0.1.2 `x86_64-unknown-linux-gnu` artifact is a dynamically linked binary
-built by GitHub Actions on Ubuntu 22.04. It requires glibc 2.34 or newer and is
-not a universal/static Linux build.
-
-The required v0.1.2 live compatibility gate targets Ubuntu 26.04/KDE with
-KWallet 6.24.0. The latest unattended run reached the provider but its graphical
-prompt was dismissed, so it did **not** satisfy the release gate. KWallet,
-GNOME Keyring, and KeePassXC remain **unverified** for v0.1.2 until the isolated
-test passes with an authorized prompt. Provider behavior can differ; please
-report failures using synthetic metadata only.
+- `secret-tool` is effective when you already know the attributes to query.
+- [`lssecret`](https://github.com/gileshuang/lssecret) lists stored entries and metadata.
+- [KeepSecret](https://apps.kde.org/keepsecret/) provides a graphical Secret Service-native interface.
+- `secretui` gives you an interactive terminal workflow for discovery, inspection, editing, and same-store metadata repair.
 
 ## Installation
 
-### Prebuilt x86-64 binary
+### Prebuilt binary
 
-Download the archive and checksum from the same GitHub release, verify them,
-then install the binary for the current user:
+The published binary targets x86-64 Linux and requires glibc 2.34 or newer.
+
+Download the archive and checksum from the same release, verify them, and install the binary for your user:
 
 ```bash
 VERSION=v0.1.2
 ARCHIVE="secretui-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-curl -fLO "https://github.com/edwordout/secretui/releases/download/${VERSION}/${ARCHIVE}"
-curl -fLO "https://github.com/edwordout/secretui/releases/download/${VERSION}/SHA256SUMS"
+
+curl -fLO \
+  "https://github.com/edwordout/secretui/releases/download/${VERSION}/${ARCHIVE}"
+curl -fLO \
+  "https://github.com/edwordout/secretui/releases/download/${VERSION}/SHA256SUMS"
+
 sha256sum --check SHA256SUMS
 tar -xzf "$ARCHIVE"
+
 mkdir -p ~/.local/bin
 install -m755 "${ARCHIVE%.tar.gz}/secretui" ~/.local/bin/secretui
+
 secretui --version
 ```
 
-The archive also includes `secretui.1`, Bash completion, the metadata-format
-and release documents, the security policy, changelog, README, image, and
-licenses. Verify that `~/.local/bin` is on `PATH`.
+Make sure `~/.local/bin` is on your `PATH`.
+
+The release archive also contains the man page, Bash completion, documentation, and licenses.
 
 ### Build from source
 
@@ -113,154 +82,181 @@ Source builds require Rust 1.97.0 and Cargo:
 ```bash
 git clone https://github.com/edwordout/secretui.git
 cd secretui
+
 cargo install --path . --locked
 secretui --version
 ```
 
-### Uninstall
+## Using the TUI
 
-For either installation method:
-
-```bash
-cargo uninstall secretui 2>/dev/null || true
-rm -f ~/.local/bin/secretui
-```
-
-Also remove any man page or completion file you installed manually. SecretUI
-does not create a configuration directory. Keep or securely remove metadata,
-recovery, and report JSON files according to your local retention policy.
-
-## Commands
+Start it with:
 
 ```bash
 secretui
-secretui export --metadata metadata.json
-secretui export --metadata metadata.json --force
-secretui import --metadata metadata.json          # build and display a plan
-secretui import --metadata metadata.json --apply  # preflight and apply that plan
-secretui import --metadata metadata.json --apply \
-  --recovery recovery.json --report report.json
-secretui completions bash > secretui.bash
-secretui man > secretui.1
 ```
 
-Export creates deterministic version 2 JSON without requesting secrets. By
-default it refuses existing paths and symlink targets. `--force` explicitly
-replaces an existing non-directory entry; replacing a symlink replaces the link
-itself and never follows its target. Files created on Unix use mode `0600`.
+The main flow is:
 
-Import is not a secret restore or a general migration facility. It matches only
-exact collection and item object paths in the **same provider database**, checks
-identity and current state, and changes collection labels, item labels, and item
-attributes only. A conflict blocks all writes. `--apply` displays one plan,
-creates a reusable version 2 recovery file and an operation report, repeats the
-full preflight, then consumes that exact plan. By default those files are
-created beside the input with a UTC timestamp; the flags above select explicit
-no-clobber paths. A failed or partial application exits nonzero, and the report
-is updated after every attempted operation. A provider can write successfully
-and then fail verification, so any failed write attempt is reported as partial
-rather than claiming that zero fields changed.
+```text
+Collections → Items → Details
+```
 
-Labels and attributes can contain sensitive usernames, account identifiers,
-service names, and internal hosts. Treat exports, plans, reports, and recovery
-files as sensitive even though they contain no secret bytes. See
-[METADATA.md](METADATA.md) for the complete format and limits.
+Common keys:
 
-Terminal output preserves normal Unicode but escapes backslashes, C0/C1 and ESC
-controls, newlines/tabs/carriage returns, and bidirectional formatting controls.
-Displayed labels are bounded to 256 graphemes, paths to 512, attribute keys and
-values to 256/512, errors to 1,024, and attribute rows to 256. A truncated value
-states its original UTF-8 byte length and a short SHA-256 identifier; storage and
-matching always use the unmodified value.
+| Key | Action |
+| --- | --- |
+| `↑` / `↓` or `j` / `k` | Move |
+| `Enter`, `→`, `l`, or `Tab` | Open or move forward |
+| `Esc`, `←`, or `h` | Go back |
+| `/` | Search |
+| `n` | Create a collection or item |
+| `r` | Reveal from the Details screen |
+| `?` | Show help |
 
-## Secret and lock handling
+Create and edit operations stay inside the TUI. Destructive confirmations start on **Cancel**, and secret replacement is kept separate from metadata editing.
 
-Secrets are hidden by default. Reveal, Copy, Save, Delete, `import --apply`, and
-any provider prompt are explicit authorization to perform the action and, when
-needed, temporarily unlock its scope. SecretUI records the original collection
-and item lock state, attempts to restore it after success or ordinary failure,
-verifies relocking, and retries pending cleanup during normal shutdown.
-Intentional Lock and Unlock actions remain persistent.
+## Metadata inspection and repair
 
-A crash, `SIGKILL`, machine failure, or forced terminal close can prevent
-asynchronous relocking and clipboard cleanup. If SecretUI exits abnormally,
-inspect and relock the affected collection with a trusted provider tool.
+Export metadata without retrieving secret values:
 
-Details show a MIME-aware escaped UTF-8 or hexadecimal preview, never raw
-terminal control sequences. Previews are limited to 256 secret bytes and expire
-after 30 seconds. Owned secret buffers are zeroized when discarded. Copy Text
-requires UTF-8; Copy Base64 uses padded RFC 4648 encoding and Copy Hex uses
-compact lowercase hex. Clipboard clearing after 30 seconds is best-effort
-because the desktop clipboard is outside this process.
+```bash
+secretui export --metadata metadata.json
+```
 
-## TUI keys
+Preview a repair plan:
 
-Pages flow `Collections → Items → Details`. `↑/↓` or `j/k` move,
-`Enter`/`→`/`l`/`Tab` go forward, `Esc`/`←`/`h` go back, `/` searches inline,
-and `?` shows help. On Collections or Items, `n` creates an object. Details
-initially focuses **Back**; press `r` for an explicit reveal. Destructive dialogs
-place and initially select **Cancel** before **Delete**.
+```bash
+secretui import --metadata metadata.json
+```
 
-Create and edit forms are scrollable in-TUI forms. Item metadata and secret
-replacement are separate actions: metadata fields are applied only when changed
-and secret replacement is never silently rolled back.
+Apply it after the full preflight succeeds:
+
+```bash
+secretui import --metadata metadata.json --apply
+```
+
+You can also choose explicit recovery and report paths:
+
+```bash
+secretui import --metadata metadata.json --apply \
+  --recovery recovery.json \
+  --report report.json
+```
+
+This workflow is deliberately narrow:
+
+- it repairs labels and attributes in the **same provider database**;
+- it matches exact collection and item object paths;
+- any conflict blocks all writes;
+- it does not migrate secrets between providers; and
+- metadata files never contain secret bytes.
+
+Metadata can still expose account names, services, internal hosts, and usage patterns. Treat exported metadata, recovery files, and reports as sensitive.
+
+See [METADATA.md](METADATA.md) for the complete format and limits.
+
+## Safety by default
+
+`secretui` is designed to make sensitive actions visible and deliberate:
+
+- browsing and metadata export do not retrieve secret values;
+- reveal, copy, save, delete, and apply actions require explicit input;
+- secret previews are escaped, limited, and expire after 30 seconds;
+- owned secret buffers are zeroized when discarded;
+- temporary unlocks are relocked and verified during ordinary shutdown paths;
+- metadata edits do not silently replace secret contents; and
+- secret bytes are kept out of exports, repair plans, reports, rendered errors, and operation logs.
+
+Clipboard clearing after 30 seconds is best-effort. Clipboard history, screen capture, privileged processes, a compromised desktop session, or forced termination remain outside the tool's protection.
+
+Read [SECURITY.md](SECURITY.md) for the threat model and private vulnerability-reporting instructions.
+
+## Remote and headless sessions
+
+`secretui` uses the Secret Service provider already running in the user's login session. It does not create a D-Bus session, start a provider, or unlock a wallet noninteractively.
+
+A remote session must already be able to reach the user's session bus and provider. When the provider needs to display an authorization prompt, access to the graphical session may still be required.
+
+Clipboard operations use the clipboard available to the process running `secretui`; over SSH, that is not automatically your local machine's clipboard.
+
+For boot-time services, unattended systems, containers, and orchestration, use a purpose-built facility such as systemd credentials, Vault, a cloud secret manager, or your platform's secret mechanism.
+
+## Compatibility
+
+The v0.1.2 release artifact:
+
+- targets `x86_64-unknown-linux-gnu`;
+- is dynamically linked;
+- is built on Ubuntu 22.04;
+- requires glibc 2.34 or newer; and
+- is not a universal or static Linux binary.
+
+Secret Service providers can behave differently. The v0.1.2 live compatibility gate has not yet been completed successfully for KWallet, GNOME Keyring, or KeePassXC. Reports using synthetic metadata are welcome.
 
 ## Troubleshooting
 
 ### No session bus
 
-Run SecretUI as the logged-in desktop user. `DBUS_SESSION_BUS_ADDRESS` should
-usually identify that user's bus. `sudo`, a bare TTY, cron, and many containers
-do not inherit it; do not copy another user's bus address into an untrusted
-process.
+Run `secretui` as the logged-in desktop user. Commands launched through `sudo`, cron, a bare TTY, or many containers may not inherit the correct `DBUS_SESSION_BUS_ADDRESS`.
 
-### No provider or provider unavailable
+### Provider unavailable
 
-Confirm that a Secret Service provider is installed, enabled, and running in
-the same user session. Desktop-specific setup is outside SecretUI. A provider
-can own `org.freedesktop.secrets` yet still reject an operation; SecretUI reports
-the failing operation and sanitized target context.
+Confirm that a Secret Service provider is installed, enabled, and running in the same user session.
 
-### Unlock prompt dismissed or not visible
+### Unlock prompt missing
 
-Retry only after checking the provider's graphical prompt. Over SSH or on a
-headless host, the provider may be unable to display it. Dismissing a prompt is
-treated as cancellation, not as an unlocked object.
+Check the graphical desktop session. A provider prompt may be hidden, dismissed, or unavailable in a headless environment.
 
 ### Clipboard unavailable
 
-Clipboard access needs a usable graphical clipboard for the process. Remote
-clipboard actions target the remote session, not automatically the local SSH
-client. SecretUI intentionally has no secret-export or secret-backup command.
+The process needs access to a working graphical clipboard. Remote clipboard operations target the remote session.
 
-### Terminal looks damaged after interruption
+### Terminal state looks broken
 
-Run `reset` or `stty sane`, then inspect the relevant provider lock state.
-SecretUI escapes controls and restores terminal mode on ordinary shutdown, but
-a forced termination can interrupt cleanup.
+After an interrupted process, run:
+
+```bash
+reset
+```
+
+or:
+
+```bash
+stty sane
+```
+
+Then inspect the provider's lock state with a trusted tool.
 
 ## Development
 
-Use project-local Cargo/Rustup state if desired:
-
 ```bash
-export CARGO_HOME=$PWD/.cargo-home
-export RUSTUP_HOME=$PWD/.rustup
-export CARGO_TARGET_DIR=$PWD/target
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets
 RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps
 ```
 
-The ignored live provider test creates globally unique temporary objects and is
-never part of the default test run:
+The ignored live-provider integration test creates temporary objects:
 
 ```bash
 SECRETUI_INTEGRATION=1 \
   cargo test --locked --test integration_secret_service -- --ignored --nocapture
 ```
 
-Never run it against important credentials without first reviewing the test.
-See [RELEASE.md](RELEASE.md) for the reproducible release gates and
-[CHANGELOG.md](CHANGELOG.md) for release notes.
+Review the test before running it against any provider that contains important credentials.
+
+Release and project details live in:
+
+- [CHANGELOG.md](CHANGELOG.md)
+- [RELEASE.md](RELEASE.md)
+- [SECURITY.md](SECURITY.md)
+- [METADATA.md](METADATA.md)
+
+## License
+
+Licensed under either of:
+
+- Apache License, Version 2.0
+- MIT License
+
+at your option.
