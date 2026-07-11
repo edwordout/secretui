@@ -6,6 +6,10 @@
 
 Linux Secret Service storage is commonly associated with desktop environments. `secretui` brings a usable, interactive management experience to terminals and remote sessions, lowering the barrier to managing Secret Service credentials on minimal and headless systems that already have the required user-session infrastructure.
 
+![secretui Collections screen showing a KDE Wallet collection](ss.png)
+
+*Browse Secret Service collections and credentials without leaving the terminal.*
+
 The project started when RustConn credentials existed in KWallet's Secret Service storage but were invisible in KWallet Manager. KWallet Manager uses the older KWallet-oriented view and may not expose generic Secret Service entries ([KDE discussion](https://discuss.kde.org/t/why-is-my-git-secret-not-visible-in-kwalletmanager-but-visible-in-seahorse-gui/43532)). That origin remains useful, but `secretui` is now positioned as a terminal-native administration and troubleshooting workspace rather than a replacement for every graphical password manager.
 
 ## Why secretui?
