@@ -54,15 +54,16 @@ async fn live_secret_service_record_lifecycle_and_metadata() {
             collection_path: collection.path.clone(),
             label: "secretui integration test".into(),
             attributes,
-            secret: SecretBytes::new(b"secretui-test-secret".to_vec()),
-            content_type: "text/plain".into(),
+            secret: SecretBytes::new(vec![0x00, 0xff, 0x10, 0x80, b'A']),
+            content_type: "application/octet-stream".into(),
         })
         .await
         .unwrap();
 
     let test_result: anyhow::Result<()> = async {
         let secret = store.reveal_secret(&item.path).await?;
-        assert_eq!(secret.as_slice(), b"secretui-test-secret");
+        assert_eq!(secret.secret.as_slice(), &[0x00, 0xff, 0x10, 0x80, b'A']);
+        assert_eq!(secret.content_type, "application/octet-stream");
 
         let mut edited_attributes = item.attributes.clone();
         edited_attributes.remove("secretui:test:remove");
@@ -86,6 +87,9 @@ async fn live_secret_service_record_lifecycle_and_metadata() {
         assert_eq!(edited_item.attributes["secretui:test:change"], "after");
         assert_eq!(edited_item.attributes["secretui:test:add"], "added");
         assert!(!edited_item.attributes.contains_key("secretui:test:remove"));
+        let preserved = store.reveal_secret(&item.path).await?;
+        assert_eq!(preserved.secret.as_slice(), &[0x00, 0xff, 0x10, 0x80, b'A']);
+        assert_eq!(preserved.content_type, "application/octet-stream");
 
         let mut imported_attributes = edited_attributes;
         imported_attributes.insert("secretui:test:metadata".into(), "applied".into());
@@ -123,6 +127,9 @@ async fn live_secret_service_record_lifecycle_and_metadata() {
             imported_item.attributes["secretui:test:metadata"],
             "applied"
         );
+        let preserved = store.reveal_secret(&item.path).await?;
+        assert_eq!(preserved.secret.as_slice(), &[0x00, 0xff, 0x10, 0x80, b'A']);
+        assert_eq!(preserved.content_type, "application/octet-stream");
         Ok(())
     }
     .await;

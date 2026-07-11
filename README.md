@@ -13,7 +13,7 @@ The project started when RustConn credentials existed in KWallet's Secret Servic
 - [KeepSecret](https://apps.kde.org/keepsecret/) provides a modern Secret Service-native graphical interface.
 - `secretui` provides interactive terminal navigation, editing, troubleshooting, and deterministic metadata migration.
 
-Its central differentiator is schema-neutral record maintenance: create, inspect, search, add, update, and remove arbitrary Secret Service attributes instead of assuming a fixed username/password shape.
+Its central differentiator is schema-neutral record maintenance: create, inspect, search, add, update, and remove arbitrary Secret Service attributes instead of assuming a fixed username/password shape or injecting application-specific attributes. Metadata-only edits preserve the stored secret bytes and content type exactly.
 
 It is aimed at developers, terminal users, minimal desktop environments, support workflows, and remote sessions that already have access to a Secret Service provider.
 
@@ -104,7 +104,9 @@ Metadata exports use deterministic version 2 JSON and never retrieve secret valu
 
 Encrypted backup and restore are intentionally unavailable in v0.1 pending a design with scoped selection, conflict previews, streaming encryption, and safe restore identity.
 
-Secrets are hidden by default. Reveal, copy, and delete require explicit user action. Copy accepts UTF-8 secrets; binary secrets are not silently converted. Clipboard clearing after 30 seconds is best-effort because the desktop clipboard is outside this process.
+Secrets are hidden by default. Reveal, copy, and delete require explicit user action. Details report the retrieved MIME content type, raw byte size, and preview encoding. Safe `text/*` UTF-8 values use an escaped text preview; all other values use a 16-byte-per-line hex dump. Previews are limited to 256 raw bytes and raw secret bytes are never written to terminal output. Revealed bytes are zeroized after 30 seconds.
+
+New textual secrets default to exactly `text/plain`; the field remains editable for arbitrary MIME content types. Copy Text requires valid UTF-8, while Copy Base64 uses standard padded RFC 4648 encoding and Copy Hex uses compact lowercase hex. Each copy action includes the complete value. Clipboard clearing after 30 seconds is best-effort because the desktop clipboard is outside this process.
 
 ## TUI keys
 

@@ -22,6 +22,20 @@ impl Drop for SecretBytes {
     }
 }
 
+pub struct SecretValue {
+    pub secret: SecretBytes,
+    pub content_type: String,
+}
+
+impl SecretValue {
+    pub fn new(secret: Vec<u8>, content_type: String) -> Self {
+        Self {
+            secret: SecretBytes::new(secret),
+            content_type,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CollectionInfo {
     pub path: String,

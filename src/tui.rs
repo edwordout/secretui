@@ -1,6 +1,9 @@
-use crate::domain::{Attributes, CollectionInfo, ItemInfo, NewCollection, NewItem, SecretBytes};
+use crate::domain::{
+    Attributes, CollectionInfo, ItemInfo, NewCollection, NewItem, SecretBytes, SecretValue,
+};
 use crate::store::SecretStore;
 use anyhow::Result;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use crossterm::{
     cursor::Show,
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -18,6 +21,7 @@ use ratatui::{
     },
     Terminal,
 };
+use std::fmt::Write as _;
 use std::io;
 use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
@@ -27,6 +31,7 @@ use zeroize::{Zeroize, Zeroizing};
 const SECRET_TTL: Duration = Duration::from_secs(30);
 const PAGE_SIZE: usize = 10;
 const MAX_UI_WIDTH: u16 = 128;
+const SECRET_PREVIEW_LIMIT: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -220,17 +225,21 @@ impl FormState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DetailAction {
     Reveal,
-    Copy,
+    CopyText,
+    CopyBase64,
+    CopyHex,
     Edit,
     Delete,
     LockUnlock,
     Back,
 }
 
-const DETAIL_ACTIONS: [DetailAction; 6] = [
+const DETAIL_ACTIONS: [DetailAction; 8] = [
     DetailAction::Back,
     DetailAction::Reveal,
-    DetailAction::Copy,
+    DetailAction::CopyText,
+    DetailAction::CopyBase64,
+    DetailAction::CopyHex,
     DetailAction::Edit,
     DetailAction::Delete,
     DetailAction::LockUnlock,
@@ -238,8 +247,30 @@ const DETAIL_ACTIONS: [DetailAction; 6] = [
 
 struct RevealState {
     item_path: String,
-    secret: SecretBytes,
+    value: SecretValue,
     expires_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewEncoding {
+    EscapedUtf8,
+    HexDump,
+}
+
+impl PreviewEncoding {
+    fn label(self) -> &'static str {
+        match self {
+            Self::EscapedUtf8 => "escaped UTF-8",
+            Self::HexDump => "hexadecimal",
+        }
+    }
+}
+
+struct SecretMetadata {
+    item_path: String,
+    content_type: String,
+    size: usize,
+    encoding: PreviewEncoding,
 }
 
 struct ClipboardClearState {
@@ -263,6 +294,7 @@ pub struct TuiApp {
     filter: String,
     message: String,
     reveal: Option<RevealState>,
+    secret_metadata: Option<SecretMetadata>,
     clipboard: Option<ArboardClipboard>,
     clipboard_clear: Option<ClipboardClearState>,
     form: Option<FormState>,
@@ -292,6 +324,7 @@ impl TuiApp {
             filter: String::new(),
             message: String::new(),
             reveal: None,
+            secret_metadata: None,
             clipboard: None,
             clipboard_clear: None,
             form: None,
@@ -669,7 +702,11 @@ fn key_starts_backend_operation(app: &TuiApp, key: KeyEvent) -> bool {
         | (Page::Collections, KeyCode::Char('l') | KeyCode::Char('/')) => true,
         (Page::Details, KeyCode::Enter) => matches!(
             app.selected_action(),
-            DetailAction::Reveal | DetailAction::Copy | DetailAction::LockUnlock
+            DetailAction::Reveal
+                | DetailAction::CopyText
+                | DetailAction::CopyBase64
+                | DetailAction::CopyHex
+                | DetailAction::LockUnlock
         ),
         (Page::Form, KeyCode::Enter) => app.form.as_ref().is_some_and(|form| {
             form.focus_buttons
@@ -1884,7 +1921,7 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::from("Actions"),
         Line::from("  Collections: n New Collection"),
         Line::from("  Items: n New Item"),
-        Line::from("  Details buttons: reveal/copy/edit/delete/lock"),
+        Line::from("  Details buttons: reveal/copy text/copy Base64/copy hex/edit/delete/lock"),
         Line::from("  / search  ? help  q quit"),
         Line::from(""),
         Line::from("Secrets stay hidden unless explicitly revealed or copied."),
@@ -1916,12 +1953,37 @@ fn detail_lines(app: &TuiApp) -> Vec<Line<'static>> {
         lines.push(Line::from(""));
         lines.push(Line::from("Secret"));
         lines.push(Line::from("  <hidden>"));
+        let metadata = app
+            .secret_metadata
+            .as_ref()
+            .filter(|metadata| metadata.item_path == item.path);
+        lines.push(Line::from(format!(
+            "  content type: {}",
+            metadata
+                .map(|metadata| escape_display_text(&metadata.content_type))
+                .as_deref()
+                .unwrap_or("unavailable until Reveal or Copy")
+        )));
+        lines.push(Line::from(format!(
+            "  size: {}",
+            metadata
+                .map(|metadata| format!("{} bytes", metadata.size))
+                .unwrap_or_else(|| "unavailable until Reveal or Copy".into())
+        )));
+        lines.push(Line::from(format!(
+            "  encoding: {}",
+            metadata
+                .map(|metadata| metadata.encoding.label())
+                .unwrap_or("unavailable until Reveal or Copy")
+        )));
         if let Some(reveal) = &app.reveal {
             if reveal.item_path == item.path {
-                lines.push(Line::from(format!(
-                    "  revealed: {}",
-                    display_secret(reveal.secret.as_slice())
-                )));
+                lines.push(Line::from("  preview:"));
+                lines.extend(
+                    secret_preview(&reveal.value)
+                        .into_iter()
+                        .map(|line| Line::from(format!("    {line}"))),
+                );
             }
         }
         lines.push(Line::from(""));
@@ -1936,7 +1998,7 @@ fn wrapped_detail_lines(app: &TuiApp, width: usize) -> (Vec<Line<'static>>, Opti
         let is_revealed = line
             .spans
             .iter()
-            .any(|span| span.content.contains("revealed:"));
+            .any(|span| span.content.contains("preview:"));
         if is_revealed {
             revealed_row = Some(wrapped.len());
         }
@@ -1950,16 +2012,74 @@ fn wrapped_detail_lines(app: &TuiApp, width: usize) -> (Vec<Line<'static>>, Opti
     (wrapped, revealed_row)
 }
 
-fn display_secret(secret: &[u8]) -> String {
-    let Ok(text) = std::str::from_utf8(secret) else {
-        return format!("<binary: {} bytes>", secret.len());
-    };
-    let mut chars = text.chars().flat_map(char::escape_default).peekable();
-    let mut visible = chars.by_ref().take(4096).collect::<String>();
-    if chars.peek().is_some() {
-        visible.push('…');
+fn preview_encoding(value: &SecretValue) -> PreviewEncoding {
+    let mime_type = value
+        .content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim();
+    let safe_text = std::str::from_utf8(value.secret.as_slice())
+        .ok()
+        .is_some_and(|text| {
+            text.chars()
+                .all(|ch| !ch.is_control() || matches!(ch, '\t' | '\n' | '\r'))
+        });
+    if mime_type.to_ascii_lowercase().starts_with("text/") && safe_text {
+        PreviewEncoding::EscapedUtf8
+    } else {
+        PreviewEncoding::HexDump
     }
-    visible
+}
+
+fn secret_preview(value: &SecretValue) -> Vec<String> {
+    let secret = value.secret.as_slice();
+    match preview_encoding(value) {
+        PreviewEncoding::EscapedUtf8 => {
+            let mut preview_len = secret.len().min(SECRET_PREVIEW_LIMIT);
+            while !std::str::from_utf8(&secret[..preview_len]).is_ok() {
+                preview_len -= 1;
+            }
+            let text = std::str::from_utf8(&secret[..preview_len]).expect("valid UTF-8 boundary");
+            let escaped = escape_display_text(text);
+            let mut lines = vec![if escaped.is_empty() {
+                "<empty>".into()
+            } else {
+                escaped
+            }];
+            append_omitted_bytes(&mut lines, secret.len() - preview_len);
+            lines
+        }
+        PreviewEncoding::HexDump => {
+            let preview_len = secret.len().min(SECRET_PREVIEW_LIMIT);
+            let mut lines = secret[..preview_len]
+                .chunks(16)
+                .enumerate()
+                .map(|(row, bytes)| {
+                    let mut line = format!("{:08x}:", row * 16);
+                    for byte in bytes {
+                        write!(line, " {byte:02x}").expect("write to string");
+                    }
+                    line
+                })
+                .collect::<Vec<_>>();
+            if lines.is_empty() {
+                lines.push("<empty>".into());
+            }
+            append_omitted_bytes(&mut lines, secret.len() - preview_len);
+            lines
+        }
+    }
+}
+
+fn escape_display_text(text: &str) -> String {
+    text.chars().flat_map(char::escape_default).collect()
+}
+
+fn append_omitted_bytes(lines: &mut Vec<String>, omitted: usize) {
+    if omitted > 0 {
+        lines.push(format!("… {omitted} byte(s) omitted"));
+    }
 }
 
 fn action_button_lines(app: &TuiApp, width: u16) -> Vec<Line<'static>> {
@@ -1968,7 +2088,9 @@ fn action_button_lines(app: &TuiApp, width: u16) -> Vec<Line<'static>> {
         let selected = index == app.selected_action;
         let label = match action {
             DetailAction::Reveal => "Reveal",
-            DetailAction::Copy => "Copy",
+            DetailAction::CopyText => "Copy Text",
+            DetailAction::CopyBase64 => "Copy Base64",
+            DetailAction::CopyHex => "Copy Hex",
             DetailAction::Edit => "Edit",
             DetailAction::Delete => "Delete",
             DetailAction::LockUnlock => {
@@ -2044,7 +2166,9 @@ fn wrap_styled_chunks(
 async fn activate_detail_action(store: &impl SecretStore, app: &mut TuiApp) -> Result<()> {
     match app.selected_action() {
         DetailAction::Reveal => reveal_selected(store, app).await?,
-        DetailAction::Copy => copy_selected(store, app).await?,
+        DetailAction::CopyText => copy_selected(store, app, CopyEncoding::Text).await?,
+        DetailAction::CopyBase64 => copy_selected(store, app, CopyEncoding::Base64).await?,
+        DetailAction::CopyHex => copy_selected(store, app, CopyEncoding::Hex).await?,
         DetailAction::Edit => start_edit_item(app),
         DetailAction::Delete => start_delete_item(app),
         DetailAction::LockUnlock => lock_toggle(store, app).await?,
@@ -2083,7 +2207,7 @@ fn start_new_item(app: &mut TuiApp) {
             FormField::text("Label", ""),
             FormField::attributes(0),
             FormField::secret("Secret"),
-            FormField::text("Secret content type", "text/plain; charset=utf-8"),
+            FormField::text("Secret content type", "text/plain"),
         ],
         attributes: Attributes::new(),
         selected_attribute: 0,
@@ -2112,7 +2236,7 @@ fn start_edit_item(app: &mut TuiApp) {
             FormField::text("Label", item.label),
             FormField::attributes(attribute_count),
             FormField::secret("New secret (blank keeps current)"),
-            FormField::text("New secret content type", "text/plain; charset=utf-8"),
+            FormField::text("New secret content type", "text/plain"),
         ],
         attributes: item.attributes,
         selected_attribute: 0,
@@ -2195,7 +2319,7 @@ async fn submit_new_item(store: &impl SecretStore, app: &mut TuiApp) -> Result<(
         .map(|form| form.attributes.clone())
         .unwrap_or_default();
     let secret = SecretBytes::new(form_value(app, 2).into_bytes());
-    let content_type = non_empty_or(form_value(app, 3), "text/plain; charset=utf-8");
+    let content_type = non_empty_or(form_value(app, 3), "text/plain");
     let item = store
         .create_item(NewItem {
             collection_path: collection.path,
@@ -2240,7 +2364,7 @@ async fn submit_edit_item(store: &impl SecretStore, app: &mut TuiApp) -> Result<
         .map(|form| form.attributes.clone())
         .unwrap_or_default();
     let secret = SecretBytes::new(form_value(app, 2).into_bytes());
-    let content_type = non_empty_or(form_value(app, 3), "text/plain; charset=utf-8");
+    let content_type = non_empty_or(form_value(app, 3), "text/plain");
     let secret_ref =
         (!secret.as_slice().is_empty()).then_some((secret.as_slice(), content_type.as_str()));
     store
@@ -2343,10 +2467,11 @@ fn non_empty_or(value: String, fallback: &str) -> String {
 async fn reveal_selected(store: &impl SecretStore, app: &mut TuiApp) -> Result<()> {
     if let Some(item) = app.selected_item() {
         let item_path = item.path.clone();
-        let secret = store.reveal_secret(&item_path).await?;
+        let value = store.reveal_secret(&item_path).await?;
+        app.secret_metadata = Some(secret_metadata(&item_path, &value));
         app.reveal = Some(RevealState {
             item_path,
-            secret,
+            value,
             expires_at: Instant::now() + SECRET_TTL,
         });
         app.page = Page::Details;
@@ -2356,11 +2481,42 @@ async fn reveal_selected(store: &impl SecretStore, app: &mut TuiApp) -> Result<(
     Ok(())
 }
 
-async fn copy_selected(store: &impl SecretStore, app: &mut TuiApp) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyEncoding {
+    Text,
+    Base64,
+    Hex,
+}
+
+impl CopyEncoding {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Base64 => "Base64",
+            Self::Hex => "hex",
+        }
+    }
+}
+
+fn secret_metadata(item_path: &str, value: &SecretValue) -> SecretMetadata {
+    SecretMetadata {
+        item_path: item_path.into(),
+        content_type: value.content_type.clone(),
+        size: value.secret.as_slice().len(),
+        encoding: preview_encoding(value),
+    }
+}
+
+async fn copy_selected(
+    store: &impl SecretStore,
+    app: &mut TuiApp,
+    encoding: CopyEncoding,
+) -> Result<()> {
     if let Some(item) = app.selected_item() {
-        let secret = store.reveal_secret(&item.path).await?;
-        let text = clipboard_text(secret.as_slice())?;
-        let expected = Zeroizing::new(text.to_owned());
+        let item_path = item.path.clone();
+        let value = store.reveal_secret(&item_path).await?;
+        app.secret_metadata = Some(secret_metadata(&item_path, &value));
+        let expected = encode_clipboard(value.secret.as_slice(), encoding)?;
         let clipboard = match app.clipboard.as_mut() {
             Some(clipboard) => clipboard,
             None => app.clipboard.insert(ArboardClipboard::new()?),
@@ -2370,7 +2526,10 @@ async fn copy_selected(store: &impl SecretStore, app: &mut TuiApp) -> Result<()>
             expected,
             expires_at: Instant::now() + SECRET_TTL,
         });
-        app.message = "copied; clipboard clear scheduled for 30s".into();
+        app.message = format!(
+            "copied as {}; clipboard clear scheduled for 30s",
+            encoding.label()
+        );
     }
     Ok(())
 }
@@ -2378,6 +2537,21 @@ async fn copy_selected(store: &impl SecretStore, app: &mut TuiApp) -> Result<()>
 fn clipboard_text(secret: &[u8]) -> Result<&str> {
     std::str::from_utf8(secret)
         .map_err(|_| anyhow::anyhow!("binary secret cannot be copied as text"))
+}
+
+fn encode_clipboard(secret: &[u8], encoding: CopyEncoding) -> Result<Zeroizing<String>> {
+    let encoded = match encoding {
+        CopyEncoding::Text => clipboard_text(secret)?.to_owned(),
+        CopyEncoding::Base64 => BASE64_STANDARD.encode(secret),
+        CopyEncoding::Hex => {
+            let mut encoded = String::with_capacity(secret.len().saturating_mul(2));
+            for byte in secret {
+                write!(encoded, "{byte:02x}").expect("write to string");
+            }
+            encoded
+        }
+    };
+    Ok(Zeroizing::new(encoded))
 }
 
 struct ArboardClipboard {
@@ -2716,15 +2890,138 @@ mod tests {
         assert!(rendered.contains('↑') || rendered.contains('↓'));
     }
 
+    fn secret_value(secret: &[u8], content_type: &str) -> SecretValue {
+        SecretValue::new(secret.to_vec(), content_type.into())
+    }
+
     #[test]
-    fn secret_display_escapes_control_characters_and_binary() {
-        assert_eq!(display_secret(b"a\nb"), "a\\nb");
-        assert_eq!(display_secret(&[0xff]), "<binary: 1 bytes>");
+    fn new_and_edit_item_content_type_defaults_to_text_plain() {
+        let mut app = sample_app();
+        start_new_item(&mut app);
+        assert_eq!(form_value(&app, 3), "text/plain");
+        assert_eq!(non_empty_or("  ".into(), "text/plain"), "text/plain");
+
+        app.form = None;
+        start_edit_item(&mut app);
+        assert_eq!(form_value(&app, 3), "text/plain");
+    }
+
+    #[test]
+    fn preview_classification_requires_safe_text_mime_and_utf8() {
+        assert_eq!(
+            preview_encoding(&secret_value(b"normal text", " Text/Plain ; charset=utf-8")),
+            PreviewEncoding::EscapedUtf8
+        );
+        assert_eq!(
+            preview_encoding(&secret_value(&[0xff], "text/plain")),
+            PreviewEncoding::HexDump
+        );
+        assert_eq!(
+            preview_encoding(&secret_value(b"before\0after", "text/plain")),
+            PreviewEncoding::HexDump
+        );
+        assert_eq!(
+            preview_encoding(&secret_value(b"before\x1bafter", "text/plain")),
+            PreviewEncoding::HexDump
+        );
+        assert_eq!(
+            preview_encoding(&secret_value(b"plain ASCII", "application/octet-stream")),
+            PreviewEncoding::HexDump
+        );
+    }
+
+    #[test]
+    fn previews_escape_text_and_bound_binary_output() {
+        assert_eq!(
+            secret_preview(&secret_value(b"a\tb\nc\r", "text/plain")),
+            ["a\\tb\\nc\\r"]
+        );
+
+        let bytes = (0..=255).chain(0..32).collect::<Vec<u8>>();
+        let preview = secret_preview(&secret_value(&bytes, "application/octet-stream"));
+        assert_eq!(
+            preview[0],
+            "00000000: 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f"
+        );
+        assert_eq!(
+            preview[15],
+            "000000f0: f0 f1 f2 f3 f4 f5 f6 f7 f8 f9 fa fb fc fd fe ff"
+        );
+        assert_eq!(preview[16], "… 32 byte(s) omitted");
+    }
+
+    #[test]
+    fn text_preview_truncates_at_utf8_boundary() {
+        let text = format!("{}érest", "a".repeat(255));
+        let preview = secret_preview(&secret_value(text.as_bytes(), "text/plain"));
+        assert_eq!(preview[0], "a".repeat(255));
+        assert_eq!(preview[1], "… 6 byte(s) omitted");
+    }
+
+    #[test]
+    fn clipboard_encodings_use_complete_secret() {
         assert_eq!(clipboard_text(b"text").unwrap(), "text");
         assert_eq!(
             clipboard_text(&[0xff]).unwrap_err().to_string(),
             "binary secret cannot be copied as text"
         );
+        assert_eq!(
+            &*encode_clipboard(b"text", CopyEncoding::Text).unwrap(),
+            "text"
+        );
+        assert_eq!(
+            &*encode_clipboard(&[0, 1, 0xfe, 0xff], CopyEncoding::Base64).unwrap(),
+            "AAH+/w=="
+        );
+        assert_eq!(
+            &*encode_clipboard(&[0, 1, 0xfe, 0xff], CopyEncoding::Hex).unwrap(),
+            "0001feff"
+        );
+    }
+
+    #[test]
+    fn details_show_unavailable_then_cached_and_expired_diagnostics() {
+        let mut app = sample_app();
+        let initial = detail_lines(&app)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(initial.contains("content type: unavailable until Reveal or Copy"));
+        assert!(initial.contains("size: unavailable until Reveal or Copy"));
+
+        let value = secret_value(b"hello", "text/plain");
+        app.secret_metadata = Some(secret_metadata("p1", &value));
+        let copied = detail_lines(&app)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(copied.contains("content type: text/plain"));
+        assert!(copied.contains("size: 5 bytes"));
+        assert!(!copied.contains("preview:"));
+
+        app.reveal = Some(RevealState {
+            item_path: "p1".into(),
+            value,
+            expires_at: Instant::now() - Duration::from_secs(1),
+        });
+        let revealed = detail_lines(&app)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(revealed.contains("preview:"));
+        assert!(revealed.contains("hello"));
+        app.expire_secret();
+        assert!(app.reveal.is_none());
+        let expired = detail_lines(&app)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(expired.contains("content type: text/plain"));
+        assert!(!expired.contains("preview:"));
     }
 
     #[test]
@@ -2805,7 +3102,16 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect::<String>();
         assert!(lines.len() > 1);
-        for label in ["Back", "Reveal", "Copy", "Edit", "Delete", "Lock"] {
+        for label in [
+            "Back",
+            "Reveal",
+            "Copy Text",
+            "Copy Base64",
+            "Copy Hex",
+            "Edit",
+            "Delete",
+            "Lock",
+        ] {
             assert!(rendered.contains(label));
         }
     }

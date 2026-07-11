@@ -1,6 +1,6 @@
 use crate::domain::{
     Attributes, CollectionInfo, ItemInfo, MetadataFile, MetadataImportSummary, NewCollection,
-    NewItem, SecretBytes,
+    NewItem, SecretValue,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -9,7 +9,7 @@ use async_trait::async_trait;
 pub trait SecretStore {
     async fn list_collections(&self) -> Result<Vec<CollectionInfo>>;
     async fn list_items(&self, collection_path: &str) -> Result<Vec<ItemInfo>>;
-    async fn reveal_secret(&self, item_path: &str) -> Result<SecretBytes>;
+    async fn reveal_secret(&self, item_path: &str) -> Result<SecretValue>;
     async fn edit_item(
         &self,
         item_path: &str,

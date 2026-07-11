@@ -111,7 +111,7 @@ impl SecretStore for SecretServiceStore {
         Ok(out)
     }
 
-    async fn reveal_secret(&self, item_path: &str) -> Result<SecretBytes> {
+    async fn reveal_secret(&self, item_path: &str) -> Result<SecretValue> {
         let item = self
             .service
             .get_item_by_path(Self::path(item_path)?)
@@ -119,9 +119,12 @@ impl SecretStore for SecretServiceStore {
         if item.is_locked().await? {
             item.unlock().await.context("unlock item")?;
         }
-        Ok(SecretBytes::new(
-            item.get_secret().await.context("read secret")?,
-        ))
+        let secret = item.get_secret().await.context("read secret")?;
+        let content_type = item
+            .get_secret_content_type()
+            .await
+            .context("read secret content type")?;
+        Ok(SecretValue::new(secret, content_type))
     }
 
     async fn edit_item(
