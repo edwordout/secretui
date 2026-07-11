@@ -39,7 +39,7 @@ Prebuilt releases are available for x86-64 Linux. Download and verify one before
 installing it into your user-local binary directory:
 
 ```bash
-VERSION=v0.1.0
+VERSION=v0.1.1
 ARCHIVE="secretui-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
 curl -fLO "https://github.com/edwordout/secretui/releases/download/${VERSION}/${ARCHIVE}"
 curl -fLO "https://github.com/edwordout/secretui/releases/download/${VERSION}/SHA256SUMS"
@@ -78,7 +78,7 @@ Maintainers should update the version in `Cargo.toml` and `Cargo.lock`, commit i
 and wait for CI on `main` to pass. Then create and push an annotated tag:
 
 ```bash
-VERSION=v0.1.0
+VERSION=v0.1.1
 git tag -a "$VERSION" -m "Release $VERSION"
 git push origin main
 git push origin "$VERSION"
