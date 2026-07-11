@@ -4,15 +4,22 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing annotated tag to publish
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.release_tag || github.ref }}
   cancel-in-progress: false
 
 env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
   TARGET: x86_64-unknown-linux-gnu
 
 jobs:
@@ -26,6 +33,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Install pinned Rust toolchain
         run: |
@@ -36,7 +44,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag="$GITHUB_REF_NAME"
+          tag="$RELEASE_TAG"
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Tag must be a semantic version such as v0.1.2: $tag" >&2
             exit 1
@@ -48,11 +56,13 @@ jobs:
             echo "Tag $tag does not match Cargo.toml version $package_version" >&2
             exit 1
           fi
-          if [[ "$(git cat-file -t "refs/tags/$tag")" != tag ]]; then
+          tag_ref="refs/secretui-release-tags/$tag"
+          git fetch --force origin "refs/tags/$tag:$tag_ref"
+          if [[ "$(git cat-file -t "$tag_ref")" != tag ]]; then
             echo "Release tag $tag must be annotated" >&2
             exit 1
           fi
-          test "$(git rev-parse "refs/tags/$tag^{}")" = "$(git rev-parse HEAD)"
+          test "$(git rev-parse "$tag_ref^{}")" = "$(git rev-parse HEAD)"
           grep -Eq "^## \[$package_version\]( |$)" CHANGELOG.md
 
       - name: Check formatting
@@ -75,7 +85,7 @@ jobs:
         run: |
           set -euo pipefail
           binary="target/$TARGET/release/secretui"
-          test "$($binary --version)" = "secretui ${GITHUB_REF_NAME#v}"
+          test "$($binary --version)" = "secretui ${RELEASE_TAG#v}"
           "$binary" --help >/dev/null
           "$binary" export --help >/dev/null
           "$binary" import --help >/dev/null
@@ -108,13 +118,13 @@ jobs:
           CARGO_TARGET_DIR="$install_root/target" \
             cargo install --path . --locked --root "$install_root/root"
           test "$("$install_root/root/bin/secretui" --version)" = \
-            "secretui ${GITHUB_REF_NAME#v}"
+            "secretui ${RELEASE_TAG#v}"
 
       - name: Package release and changelog notes
         shell: bash
         run: |
           set -euo pipefail
-          package_name="secretui-${GITHUB_REF_NAME}-${TARGET}"
+          package_name="secretui-${RELEASE_TAG}-${TARGET}"
           package_dir="dist/$package_name"
           archive="dist/$package_name.tar.gz"
           source_date_epoch="$(git log -1 --format=%ct)"
@@ -128,7 +138,7 @@ jobs:
             ss.png README.md SECURITY.md CHANGELOG.md METADATA.md RELEASE.md \
             LICENSE-APACHE LICENSE-MIT "$package_dir/"
 
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           awk -v version="$version" '
             $0 ~ "^## \\[" version "\\]( |$)" { found = 1; next }
             found && $0 ~ "^## \\[" { exit }
@@ -151,7 +161,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          package_name="secretui-${GITHUB_REF_NAME}-${TARGET}"
+          package_name="secretui-${RELEASE_TAG}-${TARGET}"
           archive="$package_name.tar.gz"
 
           (cd dist && sha256sum -c SHA256SUMS)
@@ -168,7 +178,7 @@ jobs:
             test "$(stat -c %a "release-check/$package_name/$file")" = 644
           done
           test "$("release-check/$package_name/secretui" --version)" = \
-            "secretui ${GITHUB_REF_NAME#v}"
+            "secretui ${RELEASE_TAG#v}"
 
           expected_contents="$(printf '%s\n' \
             "$package_name/" \
@@ -191,7 +201,7 @@ jobs:
         with:
           name: release-assets
           path: |
-            dist/secretui-${{ github.ref_name }}-${{ env.TARGET }}.tar.gz
+            dist/secretui-${{ env.RELEASE_TAG }}-${{ env.TARGET }}.tar.gz
             dist/SHA256SUMS
             dist/release-notes.md
           if-no-files-found: error
@@ -216,23 +226,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --draft \
             --verify-tag \
             --notes-file dist/release-notes.md \
-            --title "$GITHUB_REF_NAME"
+            --title "$RELEASE_TAG"
 
       - name: Upload verified assets and publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release upload "$GITHUB_REF_NAME" \
-            "dist/secretui-${GITHUB_REF_NAME}-${TARGET}.tar.gz" \
+          gh release upload "$RELEASE_TAG" \
+            "dist/secretui-${RELEASE_TAG}-${TARGET}.tar.gz" \
             dist/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY"
-          gh release edit "$GITHUB_REF_NAME" \
+          gh release edit "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --draft=false \
             --prerelease=false
