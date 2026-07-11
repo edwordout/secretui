@@ -1,7 +1,26 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use zeroize::Zeroize;
 
 pub type Attributes = BTreeMap<String, String>;
+
+pub struct SecretBytes(Vec<u8>);
+
+impl SecretBytes {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CollectionInfo {
@@ -17,17 +36,15 @@ pub struct ItemInfo {
     pub label: String,
     pub locked: bool,
     pub attributes: Attributes,
-    pub content_type: Option<String>,
     pub created: Option<u64>,
     pub modified: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NewItem {
     pub collection_path: String,
     pub label: String,
     pub attributes: Attributes,
-    pub secret: Vec<u8>,
+    pub secret: SecretBytes,
     pub content_type: String,
 }
 
@@ -41,6 +58,13 @@ pub struct NewCollection {
 pub struct MetadataFile {
     pub version: u32,
     pub collections: Vec<CollectionMetadata>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MetadataImportSummary {
+    pub collections_changed: usize,
+    pub items_changed: usize,
+    pub paths_missing: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -57,44 +81,11 @@ pub struct ItemMetadata {
     pub label: String,
     pub locked: bool,
     pub attributes: Attributes,
-    pub content_type: Option<String>,
     pub created: Option<u64>,
     pub modified: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SecretBackupFile {
-    pub version: u32,
-    pub collections: Vec<CollectionBackup>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CollectionBackup {
-    pub path: String,
-    pub label: String,
-    pub items: Vec<ItemBackup>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ItemBackup {
-    pub path: String,
-    pub label: String,
-    pub attributes: Attributes,
-    pub content_type: String,
-    pub secret_base64: String,
-}
-
 impl MetadataFile {
-    pub fn sorted(mut self) -> Self {
-        self.collections.sort_by(|a, b| a.path.cmp(&b.path));
-        for collection in &mut self.collections {
-            collection.items.sort_by(|a, b| a.path.cmp(&b.path));
-        }
-        self
-    }
-}
-
-impl SecretBackupFile {
     pub fn sorted(mut self) -> Self {
         self.collections.sort_by(|a, b| a.path.cmp(&b.path));
         for collection in &mut self.collections {

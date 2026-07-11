@@ -45,7 +45,9 @@ Buttons:
 - `Lock/Unlock`: lock or unlock selected collection.
 - `Back`: return to Items.
 
-Create/edit/delete forms use scrollable bordered input widgets with visible focus, cursor editing, validation messages, arrow-first navigation, and Save/Delete/Cancel buttons. Secret fields are masked while typing. Attributes open a dedicated single-column scrollable editor where users select existing attributes or add/update/remove key-value pairs. Inputs and lists keep readable minimum heights; if the terminal is too short, elements are hidden instead of crushed and scrollbars show overflow.
+Create/edit/delete forms use scrollable bordered input widgets with visible focus, cursor editing, validation messages, arrow-first navigation, and Save/Delete/Cancel buttons. Secret fields are masked while typing. Item forms contain an attribute list ending with `+ Create new attribute`; Enter opens a focused key/value editor for Add, Update, or Remove and then returns to the list. Inputs and lists keep readable minimum heights; if the terminal is too short, elements are hidden instead of crushed and scrollbars show overflow.
+
+Changed forms display an `(unsaved)` marker. Esc or Cancel opens an Unsaved Changes screen with Save Changes, Discard, and Keep Editing, defaulting to Keep Editing. Attribute editor Cancel returns to the parent draft without changing it.
 
 Destructive or sensitive actions require confirmation. Reveal/copy should auto-expire after a short timeout.
 
@@ -56,7 +58,7 @@ Destructive or sensitive actions require confirmation. Reveal/copy should auto-e
 - Zeroize only buffers owned by the app.
 - Clipboard clearing is best-effort and should be described as such.
 - Metadata export/import must not include secrets.
-- Secret backup/restore must be separate, encrypted, and guarded.
+- Secret backup/restore remains unavailable until it can be scoped, previewed, encrypted without retaining unnecessary plaintext copies, and restored without unsafe collection fallbacks.
 
 ## Desired Feel
 

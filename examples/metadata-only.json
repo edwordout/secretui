@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "collections": [
     {
       "path": "/org/freedesktop/secrets/collection/example",
@@ -14,7 +14,6 @@
             "application": "secretui-example",
             "username": "alice"
           },
-          "content_type": "text/plain",
           "created": null,
           "modified": null
         }

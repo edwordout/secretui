@@ -2,11 +2,9 @@ use crate::domain::*;
 use crate::store::SecretStore;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use secret_service::{EncryptionType, SecretService};
 use std::collections::{BTreeMap, HashMap};
 use zbus::zvariant::OwnedObjectPath;
-use zeroize::Zeroize;
 
 pub struct SecretServiceStore {
     service: SecretService<'static>,
@@ -50,12 +48,29 @@ impl SecretServiceStore {
                 .get_label()
                 .await
                 .unwrap_or_else(|_| "<unlabeled>".to_owned()),
-            locked: item.is_locked().await.unwrap_or(false),
+            locked: item.is_locked().await.context("read item lock state")?,
             attributes,
-            content_type: item.get_secret_content_type().await.ok(),
             created: item.get_created().await.ok(),
             modified: item.get_modified().await.ok(),
         })
+    }
+
+    async fn metadata_indexes(
+        &self,
+    ) -> Result<(
+        BTreeMap<String, String>,
+        BTreeMap<String, (String, Attributes)>,
+    )> {
+        let metadata = self.export_metadata().await?;
+        let mut collections = BTreeMap::new();
+        let mut items = BTreeMap::new();
+        for collection in metadata.collections {
+            collections.insert(collection.path, collection.label);
+            for item in collection.items {
+                items.insert(item.path, (item.label, item.attributes));
+            }
+        }
+        Ok((collections, items))
     }
 }
 
@@ -70,7 +85,10 @@ impl SecretStore for SecretServiceStore {
                     .get_label()
                     .await
                     .unwrap_or_else(|_| "<unlabeled>".to_owned()),
-                locked: collection.is_locked().await.unwrap_or(false),
+                locked: collection
+                    .is_locked()
+                    .await
+                    .context("read collection lock state")?,
             });
         }
         out.sort_by(|a, b| a.path.cmp(&b.path));
@@ -93,13 +111,17 @@ impl SecretStore for SecretServiceStore {
         Ok(out)
     }
 
-    async fn reveal_secret(&self, item_path: &str) -> Result<Vec<u8>> {
+    async fn reveal_secret(&self, item_path: &str) -> Result<SecretBytes> {
         let item = self
             .service
             .get_item_by_path(Self::path(item_path)?)
             .await?;
-        item.unlock().await.ok();
-        item.get_secret().await.context("read secret")
+        if item.is_locked().await? {
+            item.unlock().await.context("unlock item")?;
+        }
+        Ok(SecretBytes::new(
+            item.get_secret().await.context("read secret")?,
+        ))
     }
 
     async fn edit_item(
@@ -113,6 +135,9 @@ impl SecretStore for SecretServiceStore {
             .service
             .get_item_by_path(Self::path(item_path)?)
             .await?;
+        if item.is_locked().await? {
+            item.unlock().await.context("unlock item")?;
+        }
         if let Some(label) = label {
             item.set_label(label).await?;
         }
@@ -137,7 +162,7 @@ impl SecretStore for SecretServiceStore {
         })
     }
 
-    async fn create_item(&self, mut new_item: NewItem) -> Result<ItemInfo> {
+    async fn create_item(&self, new_item: NewItem) -> Result<ItemInfo> {
         let collection = self
             .service
             .get_collection_by_path(Self::path(&new_item.collection_path)?)
@@ -146,14 +171,20 @@ impl SecretStore for SecretServiceStore {
             .create_item(
                 &new_item.label,
                 Self::attrs_ref(&new_item.attributes),
-                &new_item.secret,
+                new_item.secret.as_slice(),
                 false,
                 &new_item.content_type,
             )
             .await?;
-        new_item.secret.zeroize();
-        self.item_info(&new_item.collection_path, item.item_path.to_string())
-            .await
+        Ok(ItemInfo {
+            collection_path: new_item.collection_path,
+            path: item.item_path.to_string(),
+            label: new_item.label,
+            locked: false,
+            attributes: new_item.attributes,
+            created: None,
+            modified: None,
+        })
     }
 
     async fn delete_item(&self, item_path: &str) -> Result<()> {
@@ -161,6 +192,9 @@ impl SecretStore for SecretServiceStore {
             .service
             .get_item_by_path(Self::path(item_path)?)
             .await?;
+        if item.is_locked().await? {
+            item.unlock().await.context("unlock item")?;
+        }
         item.delete().await.context("delete item")
     }
 
@@ -189,7 +223,6 @@ impl SecretStore for SecretServiceStore {
                     label: item.label,
                     locked: item.locked,
                     attributes: item.attributes,
-                    content_type: item.content_type,
                     created: item.created,
                     modified: item.modified,
                 })
@@ -202,29 +235,41 @@ impl SecretStore for SecretServiceStore {
             });
         }
         Ok(MetadataFile {
-            version: 1,
+            version: 2,
             collections,
         }
         .sorted())
     }
 
     async fn import_metadata(&self, metadata: MetadataFile) -> Result<usize> {
+        anyhow::ensure!(
+            matches!(metadata.version, 1 | 2),
+            "unsupported metadata version {}",
+            metadata.version
+        );
+        let (existing_collections, existing_items) = self.metadata_indexes().await?;
         let mut changed = 0;
         for collection in metadata.collections {
-            if let Ok(existing) = self
-                .service
-                .get_collection_by_path(Self::path(&collection.path)?)
-                .await
-            {
-                let _ = existing.set_label(&collection.label).await;
+            if let Some(existing_label) = existing_collections.get(&collection.path) {
+                if existing_label != &collection.label {
+                    let existing = self
+                        .service
+                        .get_collection_by_path(Self::path(&collection.path)?)
+                        .await?;
+                    existing
+                        .set_label(&collection.label)
+                        .await
+                        .context("update collection label")?;
+                }
             }
             for item in collection.items {
-                if self
-                    .service
-                    .get_item_by_path(Self::path(&item.path)?)
-                    .await
-                    .is_ok()
+                if let Some((existing_label, existing_attributes)) = existing_items.get(&item.path)
                 {
+                    let label_changed = existing_label != &item.label;
+                    let attributes_changed = existing_attributes != &item.attributes;
+                    if !label_changed && !attributes_changed {
+                        continue;
+                    }
                     self.edit_item(&item.path, Some(&item.label), Some(item.attributes), None)
                         .await?;
                     changed += 1;
@@ -234,75 +279,38 @@ impl SecretStore for SecretServiceStore {
         Ok(changed)
     }
 
-    async fn export_secret_backup(&self) -> Result<SecretBackupFile> {
-        let mut collections = Vec::new();
-        for collection in self.list_collections().await? {
-            let mut items = Vec::new();
-            for item in self.list_items(&collection.path).await? {
-                let mut secret = self.reveal_secret(&item.path).await?;
-                items.push(ItemBackup {
-                    path: item.path,
-                    label: item.label,
-                    attributes: item.attributes,
-                    content_type: item.content_type.unwrap_or_else(|| "text/plain".to_owned()),
-                    secret_base64: BASE64.encode(&secret),
-                });
-                secret.zeroize();
-            }
-            collections.push(CollectionBackup {
-                path: collection.path,
-                label: collection.label,
-                items,
-            });
-        }
-        Ok(SecretBackupFile {
-            version: 1,
-            collections,
-        }
-        .sorted())
-    }
-
-    async fn restore_secret_backup(&self, backup: SecretBackupFile) -> Result<usize> {
-        let mut changed = 0;
-        for collection in backup.collections {
-            let target = match self
-                .service
-                .get_collection_by_path(Self::path(&collection.path)?)
-                .await
-            {
-                Ok(collection) => collection,
-                Err(_) => self.service.get_any_collection().await?,
-            };
-            for item in collection.items {
-                let mut secret = BASE64.decode(&item.secret_base64)?;
-                if self
-                    .service
-                    .get_item_by_path(Self::path(&item.path)?)
-                    .await
-                    .is_ok()
-                {
-                    self.edit_item(
-                        &item.path,
-                        Some(&item.label),
-                        Some(item.attributes),
-                        Some((&secret, &item.content_type)),
-                    )
-                    .await?;
-                } else {
-                    target
-                        .create_item(
-                            &item.label,
-                            Self::attrs_ref(&item.attributes),
-                            &secret,
-                            false,
-                            &item.content_type,
-                        )
-                        .await?;
+    async fn preview_metadata_import(
+        &self,
+        metadata: &MetadataFile,
+    ) -> Result<MetadataImportSummary> {
+        anyhow::ensure!(
+            matches!(metadata.version, 1 | 2),
+            "unsupported metadata version {}",
+            metadata.version
+        );
+        let (existing_collections, existing_items) = self.metadata_indexes().await?;
+        let mut summary = MetadataImportSummary::default();
+        for collection in &metadata.collections {
+            match existing_collections.get(&collection.path) {
+                Some(existing_label) => {
+                    if existing_label != &collection.label {
+                        summary.collections_changed += 1;
+                    }
                 }
-                secret.zeroize();
-                changed += 1;
+                None => summary.paths_missing += 1,
+            }
+            for item in &collection.items {
+                match existing_items.get(&item.path) {
+                    Some((existing_label, existing_attributes)) => {
+                        if existing_label != &item.label || existing_attributes != &item.attributes
+                        {
+                            summary.items_changed += 1;
+                        }
+                    }
+                    None => summary.paths_missing += 1,
+                }
             }
         }
-        Ok(changed)
+        Ok(summary)
     }
 }

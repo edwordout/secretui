@@ -4,6 +4,7 @@
 # Project-local Rust/Cargo state
 /.cargo-home/
 /.rustup/
+/.rustup-home/
 /.cargo-tools/
 
 # Local agent/editor state

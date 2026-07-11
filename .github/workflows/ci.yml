@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-targets
+      - run: RUSTDOCFLAGS='-D warnings' cargo doc --no-deps
+      - name: Audit dependencies
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit

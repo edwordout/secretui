@@ -1,9 +1,7 @@
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
-use secretui::metadata::{
-    read_encrypted_backup, read_metadata, write_encrypted_backup, write_metadata,
-};
+use secretui::metadata::{read_metadata, write_metadata};
 use secretui::store::SecretStore;
 use secretui::store_secret_service::SecretServiceStore;
 use std::path::PathBuf;
@@ -30,18 +28,9 @@ enum Command {
     Import {
         #[arg(long)]
         metadata: PathBuf,
-    },
-    /// Export encrypted backup including secret values.
-    Backup {
+        /// Apply changes. Without this flag, only show the import plan.
         #[arg(long)]
-        encrypted: PathBuf,
-    },
-    /// Restore encrypted backup. Requires --confirm-restore.
-    Restore {
-        #[arg(long)]
-        encrypted: PathBuf,
-        #[arg(long)]
-        confirm_restore: bool,
+        apply: bool,
     },
     /// Generate shell completion script to stdout.
     Completions { shell: Shell },
@@ -79,45 +68,22 @@ async fn run_store_command(command: Option<Command>, store: &impl SecretStore) -
             println!("wrote metadata to {}", metadata.display());
             Ok(())
         }
-        Some(Command::Import { metadata }) => {
+        Some(Command::Import { metadata, apply }) => {
             let data = read_metadata(&metadata)?;
+            if !apply {
+                let summary = store.preview_metadata_import(&data).await?;
+                println!(
+                    "preview: {} collection(s) and {} item(s) would change; {} path(s) missing; rerun with --apply",
+                    summary.collections_changed, summary.items_changed, summary.paths_missing
+                );
+                return Ok(());
+            }
             let changed = store.import_metadata(data).await?;
             println!("updated {changed} item(s)");
-            Ok(())
-        }
-        Some(Command::Backup { encrypted }) => {
-            let passphrase = read_passphrase_confirmed("backup passphrase")?;
-            let data = store.export_secret_backup().await?;
-            write_encrypted_backup(&encrypted, &data, passphrase)?;
-            println!("wrote encrypted backup to {}", encrypted.display());
-            Ok(())
-        }
-        Some(Command::Restore {
-            encrypted,
-            confirm_restore,
-        }) => {
-            if !confirm_restore {
-                bail!("restore is destructive; rerun with --confirm-restore");
-            }
-            let passphrase =
-                rpassword::prompt_password("backup passphrase: ").context("read passphrase")?;
-            let data = read_encrypted_backup(&encrypted, passphrase)?;
-            let changed = store.restore_secret_backup(data).await?;
-            println!("restored {changed} item(s)");
             Ok(())
         }
         Some(Command::Completions { .. }) | Some(Command::Man) => {
             unreachable!("handled before store connection")
         }
     }
-}
-
-fn read_passphrase_confirmed(label: &str) -> Result<String> {
-    let first = rpassword::prompt_password(format!("{label}: ")).context("read passphrase")?;
-    let second = rpassword::prompt_password(format!("confirm {label}: "))
-        .context("read passphrase confirmation")?;
-    if first != second {
-        bail!("passphrases did not match");
-    }
-    Ok(first)
 }
