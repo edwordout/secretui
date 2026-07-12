@@ -19,7 +19,7 @@ filesystems, or archive implementations.
 - The release contains the binary, checksum, man page, Bash completion, image,
   README, security/changelog/metadata/release documents, and both licenses.
 - No compatibility claim is added until the isolated live test passes against
-  that exact source. The v0.1.2 gate is Ubuntu 26.04/KDE with KWallet 6.24.0;
+  that exact source. The v0.1.3 gate is Ubuntu 26.04/KDE with KWallet 6.24.0;
   GNOME Keyring and KeePassXC remain unverified.
 
 ## One-time repository setup
@@ -31,7 +31,7 @@ filesystems, or archive implementations.
    permission only to its publish job.
 4. Keep Actions pinned to full commit hashes.
 
-No signing key is configured for v0.1.2, so use an annotated **unsigned** tag.
+No signing key is configured for v0.1.3, so use an annotated **unsigned** tag.
 Do not substitute a lightweight tag. A future release may add a documented
 signing identity.
 
@@ -45,10 +45,10 @@ git pull --ff-only origin main
 test -z "$(git status --porcelain)"
 ```
 
-For v0.1.2, confirm version consistency:
+For v0.1.3, confirm version consistency:
 
 ```bash
-VERSION=0.1.2
+VERSION=0.1.3
 TAG="v$VERSION"
 test "$({ cargo metadata --locked --no-deps --format-version 1; } \
   | jq -r '.packages[] | select(.name == "secretui") | .version')" = "$VERSION"
@@ -66,7 +66,7 @@ Use the pinned Rust 1.97.0 toolchain and locked dependency graph:
 
 ```bash
 export CARGO_HOME=${CARGO_HOME:-$PWD/.cargo-home}
-export RUSTUP_HOME=${RUSTUP_HOME:-$PWD/.rustup}
+export RUSTUP_HOME=${RUSTUP_HOME:-$PWD/.rustup-home}
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$PWD/target}
 
 rustup show
@@ -82,7 +82,7 @@ Smoke-test generated interfaces and the release binary:
 
 ```bash
 BIN=target/x86_64-unknown-linux-gnu/release/secretui
-test "$($BIN --version)" = "secretui 0.1.2"
+test "$($BIN --version)" = "secretui 0.1.3"
 $BIN --help >/dev/null
 $BIN export --help >/dev/null
 $BIN import --help >/dev/null
@@ -99,7 +99,7 @@ root:
 install_root=$(mktemp -d)
 CARGO_TARGET_DIR="$install_root/target" \
   cargo install --path . --locked --root "$install_root/root"
-test "$("$install_root/root/bin/secretui" --version)" = "secretui 0.1.2"
+test "$("$install_root/root/bin/secretui" --version)" = "secretui 0.1.3"
 rm -rf "$install_root"
 ```
 
@@ -126,18 +126,18 @@ and a locked release build on Ubuntu 22.04. It then generates the man page and
 Bash completion from the just-built binary. Its expected archive contents are:
 
 ```text
-secretui-v0.1.2-x86_64-unknown-linux-gnu/
-secretui-v0.1.2-x86_64-unknown-linux-gnu/secretui
-secretui-v0.1.2-x86_64-unknown-linux-gnu/secretui.1
-secretui-v0.1.2-x86_64-unknown-linux-gnu/secretui.bash
-secretui-v0.1.2-x86_64-unknown-linux-gnu/ss.png
-secretui-v0.1.2-x86_64-unknown-linux-gnu/README.md
-secretui-v0.1.2-x86_64-unknown-linux-gnu/SECURITY.md
-secretui-v0.1.2-x86_64-unknown-linux-gnu/CHANGELOG.md
-secretui-v0.1.2-x86_64-unknown-linux-gnu/METADATA.md
-secretui-v0.1.2-x86_64-unknown-linux-gnu/RELEASE.md
-secretui-v0.1.2-x86_64-unknown-linux-gnu/LICENSE-APACHE
-secretui-v0.1.2-x86_64-unknown-linux-gnu/LICENSE-MIT
+secretui-v0.1.3-x86_64-unknown-linux-gnu/
+secretui-v0.1.3-x86_64-unknown-linux-gnu/secretui
+secretui-v0.1.3-x86_64-unknown-linux-gnu/secretui.1
+secretui-v0.1.3-x86_64-unknown-linux-gnu/secretui.bash
+secretui-v0.1.3-x86_64-unknown-linux-gnu/ss.png
+secretui-v0.1.3-x86_64-unknown-linux-gnu/README.md
+secretui-v0.1.3-x86_64-unknown-linux-gnu/SECURITY.md
+secretui-v0.1.3-x86_64-unknown-linux-gnu/CHANGELOG.md
+secretui-v0.1.3-x86_64-unknown-linux-gnu/METADATA.md
+secretui-v0.1.3-x86_64-unknown-linux-gnu/RELEASE.md
+secretui-v0.1.3-x86_64-unknown-linux-gnu/LICENSE-APACHE
+secretui-v0.1.3-x86_64-unknown-linux-gnu/LICENSE-MIT
 ```
 
 The workflow extracts the archive, compares the exact sorted member list,
@@ -146,10 +146,10 @@ validates `SHA256SUMS` before uploading either asset.
 
 ## Publish and independently verify
 
-`/tmp/release-secretui-v0.1.2.sh` automates the maintainer-controlled portion.
+`/tmp/release-secretui-v0.1.3.sh` automates the maintainer-controlled portion.
 Review it before execution. It deliberately stops for confirmation that private
 vulnerability reporting is enabled, repeats the local gates, commits and pushes
-`main`, and creates and pushes annotated tag `v0.1.2`. When the GitHub CLI (`gh`)
+`main`, and creates and pushes annotated tag `v0.1.3`. When the GitHub CLI (`gh`)
 is installed and authenticated, it also verifies the repository security
 setting, waits for public CI and the Release workflow, downloads the public
 assets into a fresh directory, and repeats checksum/archive/version validation.
@@ -157,7 +157,7 @@ Without `gh`, it asks for explicit confirmation of the security setting, relies
 on the tag-triggered workflow to repeat all release gates, and prints the Actions
 and release URLs for manual monitoring and verification.
 
-The workflow creates a draft release using the exact v0.1.2 changelog section,
+The workflow creates a draft release using the exact v0.1.3 changelog section,
 uploads the archive and `SHA256SUMS`, then publishes the draft. If it fails after
 draft creation, inspect and delete the draft before retrying; never move or
 overwrite a published version tag.

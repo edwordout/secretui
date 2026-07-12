@@ -1,6 +1,6 @@
 # SecretUI metadata format
 
-This document defines metadata JSON accepted and emitted by SecretUI v0.1.2.
+This document defines metadata JSON accepted and emitted by SecretUI v0.1.3.
 Metadata contains **no secret values** and is not a secret backup. It is intended
 for inspection and exact-path, same-store metadata repair.
 
