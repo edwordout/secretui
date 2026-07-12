@@ -22,6 +22,7 @@ use ratatui::{
     },
     Terminal,
 };
+use std::cmp::Ordering;
 use std::fmt::Write as _;
 use std::io;
 use std::time::{Duration, Instant};
@@ -289,6 +290,28 @@ struct DeleteSnapshot {
     item: ItemInfo,
 }
 
+fn listing_order(
+    left_label: &str,
+    left_path: &str,
+    right_label: &str,
+    right_path: &str,
+) -> Ordering {
+    left_label
+        .to_lowercase()
+        .cmp(&right_label.to_lowercase())
+        .then_with(|| left_label.cmp(right_label))
+        .then_with(|| left_path.cmp(right_path))
+}
+
+fn sort_collections(collections: &mut [CollectionInfo]) {
+    collections
+        .sort_by(|left, right| listing_order(&left.label, &left.path, &right.label, &right.path));
+}
+
+fn sort_items(items: &mut [ItemInfo]) {
+    items.sort_by(|left, right| listing_order(&left.label, &left.path, &right.label, &right.path));
+}
+
 pub struct TuiApp {
     collections: Vec<CollectionInfo>,
     items: Vec<ItemInfo>,
@@ -319,7 +342,9 @@ impl TuiApp {
         Ok(app)
     }
 
-    fn from_data(collections: Vec<CollectionInfo>, items: Vec<ItemInfo>) -> Self {
+    fn from_data(mut collections: Vec<CollectionInfo>, mut items: Vec<ItemInfo>) -> Self {
+        sort_collections(&mut collections);
+        sort_items(&mut items);
         let mut app = Self {
             collections,
             items,
@@ -349,6 +374,7 @@ impl TuiApp {
     async fn refresh_all(&mut self, store: &impl SecretStore) -> Result<()> {
         self.clear_reveal();
         self.collections = store.list_collections().await?;
+        sort_collections(&mut self.collections);
         self.selected_collection = self
             .selected_collection
             .min(self.collections.len().saturating_sub(1));
@@ -361,6 +387,7 @@ impl TuiApp {
             Some(collection) => store.list_items(&collection.path).await?,
             None => Vec::new(),
         };
+        sort_items(&mut self.items);
         self.clamp_item_selection();
         self.sync_states();
         Ok(())
@@ -3149,6 +3176,26 @@ mod tests {
     use crate::store::MemorySecretStore;
     use ratatui::{backend::TestBackend, Terminal};
 
+    fn collection(path: &str, label: &str) -> CollectionInfo {
+        CollectionInfo {
+            path: path.into(),
+            label: label.into(),
+            locked: false,
+        }
+    }
+
+    fn item(path: &str, label: &str) -> ItemInfo {
+        ItemInfo {
+            collection_path: "collection".into(),
+            path: path.into(),
+            label: label.into(),
+            locked: false,
+            attributes: Attributes::new(),
+            created: None,
+            modified: None,
+        }
+    }
+
     fn sample_app() -> TuiApp {
         let mut attrs = Attributes::new();
         attrs.insert("server".into(), "example".into());
@@ -3206,6 +3253,62 @@ mod tests {
         let mut app = sample_app();
         app.filter = "example".into();
         assert_eq!(app.filtered_items().len(), 1);
+    }
+
+    #[test]
+    fn listings_sort_by_case_insensitive_label_with_deterministic_ties() {
+        let app = TuiApp::from_data(
+            vec![
+                collection("c-beta", "beta"),
+                collection("c-alpha-2", "alpha"),
+                collection("c-empty", ""),
+                collection("c-alpha-1", "alpha"),
+                collection("c-upper", "ALPHA"),
+            ],
+            vec![
+                item("i-beta", "beta"),
+                item("i-alpha-2", "alpha"),
+                item("i-empty", ""),
+                item("i-alpha-1", "alpha"),
+                item("i-upper", "ALPHA"),
+            ],
+        );
+
+        assert_eq!(
+            app.collections
+                .iter()
+                .map(|collection| collection.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c-empty", "c-upper", "c-alpha-1", "c-alpha-2", "c-beta"]
+        );
+        assert_eq!(
+            app.items
+                .iter()
+                .map(|item| item.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["i-empty", "i-upper", "i-alpha-1", "i-alpha-2", "i-beta"]
+        );
+    }
+
+    #[test]
+    fn filtering_preserves_sorted_item_order() {
+        let mut app = TuiApp::from_data(
+            Vec::new(),
+            vec![
+                item("item-beta", "beta"),
+                item("item-alpha", "Alpha"),
+                item("item-empty", ""),
+            ],
+        );
+        app.filter = "item-".into();
+
+        assert_eq!(
+            app.filtered_items()
+                .iter()
+                .map(|item| item.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["item-empty", "item-alpha", "item-beta"]
+        );
     }
 
     #[test]

@@ -54,7 +54,7 @@ The published binary targets x86-64 Linux and requires glibc 2.34 or newer.
 Download the archive and checksum from the same release, verify them, and install the binary for your user:
 
 ```bash
-VERSION=v0.1.2
+VERSION=v0.1.3
 ARCHIVE="secretui-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
 
 curl -fLO \
@@ -183,7 +183,7 @@ For boot-time services, unattended systems, containers, and orchestration, use a
 
 ## Compatibility
 
-The v0.1.2 release artifact:
+The v0.1.3 release artifact:
 
 - targets `x86_64-unknown-linux-gnu`;
 - is dynamically linked;
@@ -191,7 +191,7 @@ The v0.1.2 release artifact:
 - requires glibc 2.34 or newer; and
 - is not a universal or static Linux binary.
 
-Secret Service providers can behave differently. The v0.1.2 live compatibility gate has not yet been completed successfully for KWallet, GNOME Keyring, or KeePassXC. Reports using synthetic metadata are welcome.
+Secret Service providers can behave differently. The v0.1.3 live compatibility gate has not yet been completed successfully for KWallet, GNOME Keyring, or KeePassXC. Reports using synthetic metadata are welcome.
 
 ## Troubleshooting
 

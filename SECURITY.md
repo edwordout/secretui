@@ -16,7 +16,7 @@ the newest published patch before reporting a problem that may already be fixed.
 
 Use [GitHub private vulnerability reporting](https://github.com/edwordout/secretui/security/advisories/new).
 Do not open a public issue for a suspected vulnerability. Private vulnerability
-reporting must be enabled in the repository before v0.1.2 is published.
+reporting must be enabled in the repository before any release is published.
 
 Include, when relevant:
 

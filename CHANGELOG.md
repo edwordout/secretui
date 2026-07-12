@@ -6,6 +6,17 @@ allowed to evolve.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-12
+
+### Changed
+
+- Collections and items in the TUI are now sorted by visible label using a
+  case-insensitive, deterministic order. Empty labels appear first, with exact
+  labels and object paths used as tie-breakers.
+- Release verification now fetches and checks the remote annotated tag object
+  directly, and the release workflow can safely publish an existing immutable
+  tag through an explicit manual dispatch.
+
 ## [0.1.2] - 2026-07-11
 
 **SecretUI v0.1.2 focuses on safe mutation, predictable lock handling,
@@ -86,7 +97,8 @@ distribution.**
   deterministic export/import preview, clipboard actions, man generation, Bash
   completion, CI, and release packaging.
 
-[Unreleased]: https://github.com/edwordout/secretui/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/edwordout/secretui/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/edwordout/secretui/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/edwordout/secretui/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/edwordout/secretui/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/edwordout/secretui/releases/tag/v0.1.0
