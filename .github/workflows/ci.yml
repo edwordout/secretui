@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches:
+      - "**"
   pull_request:
 
 permissions:
@@ -18,26 +20,90 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Determine CI scope
+        id: scope
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          run_full=true
+          diff_range=
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            base_sha="$PULL_REQUEST_BASE_SHA"
+            head_sha="$PULL_REQUEST_HEAD_SHA"
+            if git cat-file -e "${base_sha}^{commit}" 2>/dev/null \
+              && git cat-file -e "${head_sha}^{commit}" 2>/dev/null \
+              && git merge-base "$base_sha" "$head_sha" >/dev/null; then
+              diff_range="${base_sha}...${head_sha}"
+            fi
+          elif [[ "$EVENT_NAME" == "push" \
+            && ! "$PUSH_BASE_SHA" =~ ^0+$ ]]; then
+            base_sha="$PUSH_BASE_SHA"
+            head_sha="$HEAD_SHA"
+            if git cat-file -e "${base_sha}^{commit}" 2>/dev/null \
+              && git cat-file -e "${head_sha}^{commit}" 2>/dev/null; then
+              diff_range="${base_sha}..${head_sha}"
+            fi
+          fi
+
+          if [[ -n "$diff_range" ]]; then
+            git diff --check "$diff_range"
+            run_full=false
+            while IFS= read -r -d '' changed_path; do
+              case "$changed_path" in
+                *.md|LICENSE-APACHE|LICENSE-MIT|ss.png) ;;
+                *)
+                  run_full=true
+                  break
+                  ;;
+              esac
+            done < <(git diff --name-only --no-renames -z "$diff_range")
+          fi
+
+          echo "run_full=$run_full" >> "$GITHUB_OUTPUT"
+
+      - name: Report documentation-only change
+        if: steps.scope.outputs.run_full != 'true'
+        run: |
+          echo "Documentation-only change detected; Rust gates were skipped." \
+            >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install pinned Rust toolchain
+        if: steps.scope.outputs.run_full == 'true'
         run: rustup show
 
       - name: Check formatting
+        if: steps.scope.outputs.run_full == 'true'
         run: cargo fmt --check
 
       - name: Run Clippy
+        if: steps.scope.outputs.run_full == 'true'
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Run tests
+        if: steps.scope.outputs.run_full == 'true'
         run: cargo test --locked --all-targets
 
       - name: Check documentation
+        if: steps.scope.outputs.run_full == 'true'
         run: RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps
 
       - name: Build release binary
+        if: steps.scope.outputs.run_full == 'true'
         run: cargo build --locked --release
 
       - name: Smoke-test CLI, man page, and completion
+        if: steps.scope.outputs.run_full == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -52,6 +118,7 @@ jobs:
           test -s /tmp/secretui.bash
 
       - name: Test clean locked installation
+        if: steps.scope.outputs.run_full == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -63,6 +130,7 @@ jobs:
             "$(target/release/secretui --version)"
 
       - name: Audit dependencies
+        if: steps.scope.outputs.run_full == 'true'
         run: |
           cargo install cargo-audit --locked
           cargo audit
