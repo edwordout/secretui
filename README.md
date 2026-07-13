@@ -40,9 +40,9 @@ With `secretui`, you can:
 
 Existing tools solve related (but different) problems:
 
-- `secret-tool` is effective when you already know the attributes to query.
+- [libsecret](https://gitlab.gnome.org/GNOME/libsecret) provides `secret-tool`, which is effective when you already know the attributes to query.
 - [`lssecret`](https://github.com/gileshuang/lssecret) lists stored entries and metadata.
-- [KeepSecret](https://apps.kde.org/keepsecret/) provides a graphical Secret Service-native interface.
+- [keepsecret](https://github.com/KDE/keepsecret/) provides a graphical Secret Service-native interface.
 - `secretui` gives you an interactive terminal workflow for discovery, inspection, editing, and same-store metadata repair.
 
 ## Installation
