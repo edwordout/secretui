@@ -6,6 +6,16 @@ allowed to evolve.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-07-13
+
+### Changed
+
+- Split the in-memory store, metadata workflows, and terminal workflows into
+  focused internal modules while preserving the existing public Rust module
+  paths, serialized formats, ordering, limits, permissions, and behavior.
+- Release verification now requires the README installation version to match
+  the release tag.
+
 ## [0.1.3] - 2026-07-12
 
 ### Changed
@@ -97,7 +107,8 @@ distribution.**
   deterministic export/import preview, clipboard actions, man generation, Bash
   completion, CI, and release packaging.
 
-[Unreleased]: https://github.com/edwordout/secretui/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/edwordout/secretui/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/edwordout/secretui/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/edwordout/secretui/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/edwordout/secretui/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/edwordout/secretui/compare/v0.1.0...v0.1.1

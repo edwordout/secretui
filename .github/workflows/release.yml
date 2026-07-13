@@ -40,7 +40,7 @@ jobs:
           rustup show
           rustup target add "$TARGET"
 
-      - name: Verify tag and changelog match package version
+      - name: Verify tag, changelog, and README match package version
         shell: bash
         run: |
           set -euo pipefail
@@ -64,6 +64,15 @@ jobs:
           fi
           test "$(git rev-parse "$tag_ref^{}")" = "$(git rev-parse HEAD)"
           grep -Eq "^## \[$package_version\]( |$)" CHANGELOG.md
+
+          mapfile -t readme_versions < <(
+            sed -nE 's/^VERSION=(v[0-9]+\.[0-9]+\.[0-9]+)$/\1/p' README.md
+          )
+          if [[ "${#readme_versions[@]}" -ne 1 \
+            || "${readme_versions[0]}" != "$tag" ]]; then
+            echo "README installation version must appear once and match $tag" >&2
+            exit 1
+          fi
 
       - name: Check formatting
         run: cargo fmt --check
